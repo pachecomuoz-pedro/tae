@@ -1,0 +1,7 @@
+# Lo que no entra a la imagen: secretos, dependencias del frontend y basura.
+.env
+.git
+**/__pycache__
+web/node_modules
+staticfiles
+respaldos

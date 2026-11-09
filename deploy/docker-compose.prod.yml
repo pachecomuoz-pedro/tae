@@ -1,0 +1,73 @@
+# Producción. Se usa desde la raíz del repo:
+#   docker compose -f deploy/docker-compose.prod.yml --env-file .env up -d --build
+# Guía completa: docs/DESPLIEGUE.md
+#
+# Diferencias con el docker-compose.yml de desarrollo:
+# - gunicorn en lugar de runserver;
+# - sin montar el código como volumen (la imagen lleva el código);
+# - Django escucha solo en 127.0.0.1, detrás de nginx;
+# - MySQL y Redis sin puertos publicados;
+# - contraseña de root de MySQL distinta a la de la aplicación;
+# - reinicio automático y logs con tope de tamaño.
+
+x-logging: &bitacora
+  driver: json-file
+  options: { max-size: "20m", max-file: "5" }
+
+services:
+  db:
+    image: mysql:8.0
+    command: --default-storage-engine=INNODB --character-set-server=utf8mb4
+    restart: unless-stopped
+    logging: *bitacora
+    environment:
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - datos_mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      retries: 20
+
+  cache:
+    image: redis:7-alpine
+    restart: unless-stopped
+    logging: *bitacora
+
+  web:
+    build: ..
+    env_file: ../.env
+    restart: unless-stopped
+    logging: *bitacora
+    # El timeout de gunicorn (90 s) tiene que ser MAYOR que lo más que puede
+    # tardar una venta: 30 s de envío + consulta a los 40 s + 2 consultas
+    # cada 10 s = unos 75 s. Si gunicorn corta antes, la venta queda a medias.
+    command: >
+      gunicorn config.wsgi:application
+      --bind 0.0.0.0:8000 --workers 3 --threads 4 --timeout 90
+      --access-logfile -
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ../staticfiles:/app/staticfiles
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Catálogo diario y reintentos cada 5 min. Sustituye al crontab de esas
+  # dos tareas: corre igual en cualquier sistema. Ver programador.py.
+  tareas:
+    build: ..
+    env_file: ../.env
+    restart: unless-stopped
+    logging: *bitacora
+    command: python manage.py programador
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  datos_mysql:

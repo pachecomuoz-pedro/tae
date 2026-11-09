@@ -1,0 +1,9 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #raiz { height: 100%; }
+body { background: #F2F4F7; color: #13243D; }
+
+/* Los números de dinero se leen en columna: tabulares o no se alinean. */
+.cifras { font-variant-numeric: tabular-nums; }

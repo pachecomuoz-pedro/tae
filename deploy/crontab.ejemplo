@@ -1,0 +1,17 @@
+# Tareas del servidor (Linux) que NO van dentro de Docker. Instalar con
+# crontab -e (usuario tae). Guía: docs/DESPLIEGUE.md, paso 11.
+#
+# El catálogo diario y los reintentos de ventas sin resolver NO van aquí:
+# los corre el contenedor `tareas` (programador.py), que funciona igual en
+# Windows y en Linux. Si prefieres cron en lugar del contenedor, apaga
+# `tareas` y descomenta las dos líneas de abajo (nunca los dos a la vez:
+# las tareas correrían doble).
+SHELL=/bin/bash
+COMPOSE="docker compose -f /opt/tae/deploy/docker-compose.prod.yml --env-file /opt/tae/.env"
+
+# Diario a las 3:00: respaldo de la base de datos.
+0 3 * * * /opt/tae/deploy/respaldo.sh >> /opt/tae/respaldos/respaldo.log 2>&1
+
+# Alternativa al contenedor `tareas`:
+# 0 4 * * *   cd /opt/tae && $COMPOSE exec -T web python manage.py sincronizar_catalogo
+# */5 * * * * cd /opt/tae && $COMPOSE exec -T web python manage.py reintentar_pendientes
