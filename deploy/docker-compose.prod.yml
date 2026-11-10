@@ -1,11 +1,15 @@
-# Producción. Se usa desde la raíz del repo:
+# Producción: base de datos, Redis, Django, tareas y React.
+# Se usa desde la raíz del repo:
 #   docker compose -f deploy/docker-compose.prod.yml --env-file .env up -d --build
 # Guía completa: docs/DESPLIEGUE.md
 #
+#   Internet ─HTTPS→ Nginx del servidor (Certbot) → 127.0.0.1:8080 → web
+#   web (Nginx + React compilado) ─/api→ api (gunicorn) ─→ db, cache
+#
 # Diferencias con el docker-compose.yml de desarrollo:
-# - gunicorn en lugar de runserver;
-# - sin montar el código como volumen (la imagen lleva el código);
-# - Django escucha solo en 127.0.0.1, detrás de nginx;
+# - gunicorn en lugar de runserver, y React compilado en lugar de Vite;
+# - sin montar el código como volumen (las imágenes llevan el código);
+# - solo `web` publica un puerto, y solo en 127.0.0.1 (el Nginx del servidor);
 # - MySQL y Redis sin puertos publicados;
 # - contraseña de root de MySQL distinta a la de la aplicación;
 # - reinicio automático y logs con tope de tamaño.
@@ -37,7 +41,7 @@ services:
     restart: unless-stopped
     logging: *bitacora
 
-  web:
+  api:
     build: ..
     env_file: ../.env
     restart: unless-stopped
@@ -49,10 +53,9 @@ services:
       gunicorn config.wsgi:application
       --bind 0.0.0.0:8000 --workers 3 --threads 4 --timeout 90
       --access-logfile -
-    ports:
-      - "127.0.0.1:8000:8000"
+    # Sin puerto publicado: solo `web` le habla, por la red interna.
     volumes:
-      - ../staticfiles:/app/staticfiles
+      - estaticos:/app/staticfiles
     depends_on:
       db:
         condition: service_healthy
@@ -69,5 +72,20 @@ services:
       db:
         condition: service_healthy
 
+  web:
+    build:
+      context: ../web
+      target: produccion
+    restart: unless-stopped
+    logging: *bitacora
+    ports:
+      # Solo el Nginx del servidor llega aquí; el HTTPS lo hace él.
+      - "127.0.0.1:8080:80"
+    volumes:
+      - estaticos:/usr/share/nginx/static:ro
+    depends_on:
+      - api
+
 volumes:
   datos_mysql:
+  estaticos:

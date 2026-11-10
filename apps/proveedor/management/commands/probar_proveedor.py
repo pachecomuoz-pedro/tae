@@ -8,9 +8,9 @@ cobro desconocido. Las ventas de prueba se hacen desde la pantalla de la caja.
 
 En Windows (PowerShell), con Docker corriendo:
 
-    docker compose exec web python manage.py probar_proveedor
-    docker compose exec web python manage.py probar_proveedor --probar-prefijos
-    docker compose exec web python manage.py probar_proveedor --lookup 12 --evidencia evidencias/sesion1
+    docker compose exec api python manage.py probar_proveedor
+    docker compose exec api python manage.py probar_proveedor --probar-prefijos
+    docker compose exec api python manage.py probar_proveedor --lookup 12 --evidencia evidencias/sesion1
 
 --evidencia guarda cada petición y respuesta en JSON con fecha y hora, como
 pide el Plan de certificación (request, response, código HTTP, timestamp).

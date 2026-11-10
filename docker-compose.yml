@@ -1,3 +1,15 @@
+# Desarrollo y pruebas rápidas: todo en contenedores.
+#
+#   db       MySQL 8
+#   cache    Redis 7
+#   api      Django (runserver)            → http://localhost:8000/api
+#   tareas   programador: catálogo diario y reintentos de ventas
+#   web      React (Vite, recarga en vivo) → http://localhost:5173
+#
+#   docker compose up -d --build
+#
+# Producción usa deploy/docker-compose.prod.yml (gunicorn y Nginx).
+
 services:
   db:
     image: mysql:8.0
@@ -17,7 +29,7 @@ services:
   cache:
     image: redis:7-alpine
 
-  backend:
+  api:
     build: .
     command: python manage.py runserver 0.0.0.0:8000
     env_file: .env
@@ -28,22 +40,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-
-  frontend:
-    build:
-      context: ./web
-      dockerfile: Dockerfile
-    command: npm run dev -- --host 0.0.0.0
-    volumes:
-      - ./web:/app
-      - node_modules:/app/node_modules
-    ports:
-      - "5173:5173"
-    environment:
-      - CHOKIDAR_USEPOLLING=true
-    depends_on:
-      - backend
-    restart: unless-stopped
 
   # Tareas programadas: catálogo diario y reintentos de ventas sin resolver.
   # Hace las veces de crontab (Windows no tiene). Ver
@@ -59,6 +55,21 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  web:
+    build:
+      context: ./web
+      target: desarrollo
+    environment:
+      VITE_API_DESTINO: http://api:8000
+      VITE_POLLING: "1"
+    volumes:
+      - ./web:/app
+      # node_modules se queda el del contenedor (Linux), no el de Windows.
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+
 volumes:
   datos_mysql:
-  node_modules:

@@ -76,3 +76,16 @@ Ahora hay 234 y todas pasan.
 - Variables nuevas en `.env.example`: `TAE_CLAVE_INICIAL`, `TAE_NOMBRE_INQUILINO` y los correos y nombres de los cuatro usuarios iniciales.
 - `sembrar_demo.py` queda solo para `pruebas_e2e.py`.
 - Pruebas: 242, todas pasan.
+
+
+---
+
+## Quinta entrega: todo en contenedores
+
+- **Renombre:** el servicio de Django pasa de `web` a **`api`**; **`web`** ahora es React. Todos los comandos son `docker compose exec api …`.
+- **`web/Dockerfile`** con dos etapas: `desarrollo` (Vite con recarga en vivo, sondeo para Windows) y `produccion` (Nginx con el build, que reenvía `/api` a `api`).
+- **`docker-compose.yml`** (desarrollo): db, cache, api, tareas y web. Ya no hace falta instalar Node.js en Windows.
+- **`deploy/docker-compose.prod.yml`**: los mismos cinco servicios. Solo `web` publica puerto (`127.0.0.1:8080`) y los estáticos de Django van en un volumen compartido.
+- **`deploy/nginx-tae.conf`**: el Nginx del servidor solo pone HTTPS y reenvía a `web`.
+- **`DESPLIEGUE.md`**: sin Node.js ni copia manual del build; React se compila en su contenedor.
+- **`.env.example`**: `DJANGO_ALLOWED_HOSTS` incluye `api`, porque el proxy de Vite llama a Django con ese nombre.

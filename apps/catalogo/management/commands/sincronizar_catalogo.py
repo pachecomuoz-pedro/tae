@@ -4,7 +4,7 @@ Actualiza el catálogo con lo que Emida lista para el terminal.
 Corre una vez al día solo, desde el servicio `tareas` (ver
 apps/core/management/commands/programador.py). A mano, en Windows:
 
-    docker compose exec web python manage.py sincronizar_catalogo
+    docker compose exec api python manage.py sincronizar_catalogo
 
 Qué hace y qué no: ver apps/catalogo/sincronizacion.py.
 """

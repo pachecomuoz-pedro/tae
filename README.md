@@ -64,9 +64,13 @@ tae/
 │   ├── api/           endpoints HTTP (vistas.py y vistas_red.py), una línea por ruta en urls.py
 │   └── conciliacion/  archivo del proveedor, diferencias, corte; comandos de cron
 ├── config/            settings por variables de entorno
+├── Dockerfile         imagen de Django (servicios api y tareas)
+├── docker-compose.yml desarrollo: db, cache, api, tareas y web
 ├── web/               frontend React + Vite + Tailwind
+│   ├── Dockerfile     etapa "desarrollo" (Vite) y "produccion" (Nginx con el build)
+│   ├── nginx.conf     Nginx del contenedor en producción: React y /api → api
 │   └── src/           App.tsx (menú por rol), Venta, Cliente, Admin, Red (altas y aprobaciones), Exposicion
-├── deploy/            Compose de producción, nginx, respaldo y cron
+├── deploy/            Compose de producción (5 contenedores), Nginx del servidor, respaldo y cron
 ├── docs/              DECISIONES.md, PRUEBAS_UAT.md, DESPLIEGUE.md y CAMBIOS.md
 ├── sembrar_demo.py    datos de demostración
 └── pruebas_e2e.py     prueba de punta a punta con navegador
@@ -76,7 +80,17 @@ La regla que sostiene la arquitectura (decisión 3): **las vistas llaman a `iden
 
 ## 4. Correrlo en local (Windows)
 
-Requisitos: Docker Desktop y Node.js 20 o superior. Los comandos son para **PowerShell**, en la carpeta del proyecto.
+Requisito: Docker Desktop (no hace falta instalar Python ni Node.js). Los comandos son para **PowerShell**, en la carpeta del proyecto.
+
+Todo corre en cinco contenedores:
+
+| Servicio | Qué es | Dirección |
+|---|---|---|
+| `db` | MySQL 8 | interno |
+| `cache` | Redis 7 | interno |
+| `api` | Django | http://localhost:8000/api |
+| `tareas` | Programador: catálogo diario y reintentos de ventas | interno |
+| `web` | React (Vite, con recarga en vivo) | **http://localhost:5173** |
 
 ```powershell
 # 1. Configuración. Para datos reales de Emida pon PROVEEDOR_MODO=real y las
@@ -84,18 +98,17 @@ Requisitos: Docker Desktop y Node.js 20 o superior. Los comandos son para **Powe
 Copy-Item .env.example .env
 notepad .env
 
-# 2. Base de datos, Redis, Django y el programador de tareas
+# 2. Los cinco contenedores
 docker compose up -d --build
-docker compose exec web python manage.py migrate
+docker compose exec api python manage.py migrate
 
 # 3. Instalación de primera vez: 4 usuarios, catálogo real y saldo de Emida
-docker compose exec web python manage.py instalar
+docker compose exec api python manage.py instalar
 
-# 4. Frontend, en otra ventana de PowerShell
-cd web
-npm install
-npm run dev        # http://localhost:5173
+# 4. Abrir http://localhost:5173
 ```
+
+Los cambios al código de Django y de React se ven sin reconstruir: los dos contenedores montan la carpeta del proyecto. Solo hace falta `docker compose up -d --build` cuando cambian `requirements.txt` o `web/package.json`.
 
 **`instalar`** hace en un solo paso lo que necesita una tienda nueva:
 
@@ -111,8 +124,10 @@ Los saldos de la red empiezan en cero: el Super Admin los asigna en **Usuarios d
 Después de cambiar el `.env` hay que recrear los contenedores; reiniciarlos desde Docker Desktop no siempre vuelve a leer el archivo:
 
 ```powershell
-docker compose up -d --force-recreate web tareas
+docker compose up -d --force-recreate api tareas
 ```
+
+Para ver qué pasa: `docker compose logs -f api` (Django) o `docker compose logs -f web` (React).
 
 Para conectar con Emida UAT en lugar del simulador, sigue `docs/PRUEBAS_UAT.md`.
 
@@ -198,7 +213,7 @@ Todas, menos el login, llevan el prefijo `PROVEEDOR_PREFIJO_OPERACIONES` (vacío
 ## 9. Pruebas
 
 ```bash
-docker compose exec web python manage.py test apps
+docker compose exec api python manage.py test apps
 ```
 
 Son 242 pruebas. Corren contra MySQL o MariaDB, **nunca SQLite**: `test_concurrencia.py` usa hilos reales contra el bloqueo de fila de InnoDB, y SQLite serializa las escrituras, así que la prueba pasaría sin probar nada.
@@ -235,7 +250,7 @@ Prueba de punta a punta con navegador real: ver el encabezado de `pruebas_e2e.py
 | `conciliar` | Cruza el archivo del proveedor con nuestras ventas (`--sin-resolver` solo reporta) | Con cada archivo del proveedor |
 | `exportar_evidencia` | JSON por venta y `reporte_emida.csv` en formato de conciliación de Emida | Certificación y reporte diario |
 
-Todos se corren con `docker compose exec web python manage.py <comando>`.
+Todos se corren con `docker compose exec api python manage.py <comando>`.
 
 **El contenedor `tareas` tiene que estar arriba.** Sin él, el catálogo no se actualiza y una venta sin resolver se queda así para siempre, con el saldo del tendero apartado. Hace las veces de crontab, porque Windows no tiene (decisión 25).
 
@@ -246,12 +261,12 @@ Todos se corren con `docker compose exec web python manage.py <comando>`.
 | `Bad Request (400)` al abrir | El host no está en `DJANGO_ALLOWED_HOSTS` | Agregarlo y recrear `web` |
 | Entra, pero el primer POST da 403 | Falta el origen en `DJANGO_CSRF_ORIGINS` | Agregarlo y recrear `web` |
 | `No scheme supplied` al vender | `PROVEEDOR_BASE_URL` vacía | Llenarla con `https://host:puerto` |
-| La venta responde 503, clave `proveedor` | No hubo login con axexo (la venta no salió) | `docker compose logs --tail=80 web`; revisar credenciales y red |
+| La venta responde 503, clave `proveedor` | No hubo login con axexo (la venta no salió) | `docker compose logs --tail=80 api`; revisar credenciales y red |
 | `Connection to gw-uat.axexo.com timed out` | IP no autorizada por axexo, o salida por otra IP | Comparar `curl -4 ifconfig.me` con la IP autorizada |
 | Las ventas responden 404 del proveedor | Las operaciones viven bajo `/integratorapi` | `PROVEEDOR_PREFIJO_OPERACIONES=/integratorapi` |
 | El Super Admin no puede entrar | Falta activar su segundo factor | `preparar_super_admin --correo ... --solo-totp` |
 | La app no arranca: "PROVEEDOR_MODO=simulado no se permite" | `.env` de desarrollo en producción | `PROVEEDOR_MODO=real` |
-| Cambié el `.env` y no pasa nada | El reinicio no vuelve a leer el archivo | `docker compose up -d --force-recreate web` |
+| Cambié el `.env` y no pasa nada | El reinicio no vuelve a leer el archivo | `docker compose up -d --force-recreate api` |
 | `Access denied for user` en MySQL | El volumen se creó con otras credenciales | `docker compose down -v` (**borra la base local**) |
 | No existe `/admin` | Decisión: toda alta pasa por la API, con permisos y bitácora | Usar la pantalla "Usuarios de la red" |
 | Exposición: "no se encontró el saldo en la respuesta" | Emida usa otro nombre de campo | Revisar la respuesta guardada y agregar el campo en `CAMPOS_SALDO` (`apps/proveedor/saldo.py`) |

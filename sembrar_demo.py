@@ -8,7 +8,7 @@ Para instalar una tienda de verdad usa: python manage.py instalar
 Esto NO es para producción: existe para recorrer la aplicación completa sin
 depender del UAT. Úsalo junto con PROVEEDOR_MODO=simulado.
 
-    docker compose exec web python sembrar_demo.py
+    docker compose exec api python sembrar_demo.py
 
 Usuarios (todos con la contraseña de CLAVE, abajo):
     brenda@eps.mx       Administrador

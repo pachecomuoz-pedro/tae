@@ -13,7 +13,7 @@ ya las tiene) y nunca imprime el token ni la contraseña.
 
 En Windows (PowerShell), con Docker corriendo:
 
-    docker compose exec web python diagnostico_emida.py
+    docker compose exec api python diagnostico_emida.py
 
 Copia TODA la salida y compártela: no lleva datos secretos.
 """
@@ -122,8 +122,8 @@ def main():
         for pref in ("", PREFIJO):
             pruebas = [
                 ("carriers", "/api/v1/terminal/carriers", {}),
-                ("saldo + Merchant-Id", "/api/v1/account/balance", {"Merchant-Id": merchant} if merchant else {}),
-                ("saldo sin Merchant-Id", "/api/v1/account/balance", {}),
+                ("saldo + Merchant-Id", "/api/v1/merchants/account/balance", {"Merchant-Id": merchant} if merchant else {}),
+                ("saldo sin Merchant-Id", "/api/v1/merchants/account/balance", {}),
             ]
             for etiqueta, ruta, extra in pruebas:
                 cab = dict(cab_base, Authorization=f"Bearer {token}", **extra)

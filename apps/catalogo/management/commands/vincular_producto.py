@@ -8,11 +8,11 @@ agrega o actualiza la ruta.
 
 Ejemplo (PowerShell, una sola línea):
 
-    docker compose exec web python manage.py vincular_producto --product-id 2001 --sku TEL-TAE-100 --nombre "Telcel Tiempo Aire $100" --carrier Telcel --monto 100
+    docker compose exec api python manage.py vincular_producto --product-id 2001 --sku TEL-TAE-100 --nombre "Telcel Tiempo Aire $100" --carrier Telcel --monto 100
 
 Para ver los product_id disponibles:
 
-    docker compose exec web python manage.py vincular_producto --listar
+    docker compose exec api python manage.py vincular_producto --listar
 """
 from decimal import Decimal
 

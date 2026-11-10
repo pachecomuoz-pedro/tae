@@ -13,5 +13,5 @@ COMPOSE="docker compose -f /opt/tae/deploy/docker-compose.prod.yml --env-file /o
 0 3 * * * /opt/tae/deploy/respaldo.sh >> /opt/tae/respaldos/respaldo.log 2>&1
 
 # Alternativa al contenedor `tareas`:
-# 0 4 * * *   cd /opt/tae && $COMPOSE exec -T web python manage.py sincronizar_catalogo
-# */5 * * * * cd /opt/tae && $COMPOSE exec -T web python manage.py reintentar_pendientes
+# 0 4 * * *   cd /opt/tae && $COMPOSE exec -T api python manage.py sincronizar_catalogo
+# */5 * * * * cd /opt/tae && $COMPOSE exec -T api python manage.py reintentar_pendientes

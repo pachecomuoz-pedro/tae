@@ -15,9 +15,9 @@ Los saldos de la red NO salen de Emida: empiezan en cero y el Super Admin
 los asigna a mano desde "Usuarios de la red" (decisión 23).
 
 En Windows (PowerShell), después de `docker compose up -d --build` y
-`docker compose exec web python manage.py migrate`:
+`docker compose exec api python manage.py migrate`:
 
-    docker compose exec web python manage.py instalar
+    docker compose exec api python manage.py instalar
 
 Las contraseñas temporales se muestran UNA vez en esta ventana. Por eso la
 instalación no corre sola al levantar Docker: quedarían en los logs.
@@ -80,7 +80,7 @@ class Command(BaseCommand):
         if not Usuario.objects.get(pk=sa.pk).totp_listo:
             self.stdout.write(self.style.WARNING(
                 "\nEl Super Admin aún no tiene segundo factor y sin él no puede entrar. Actívalo con:\n"
-                f"    docker compose exec web python manage.py preparar_super_admin --correo {sa.correo} --solo-totp"
+                f"    docker compose exec api python manage.py preparar_super_admin --correo {sa.correo} --solo-totp"
             ))
 
         if op["sin_emida"]:

@@ -225,8 +225,13 @@ class ClienteProveedor:
     def _autenticar(self):
         url = f"{self.config.base_url}{self.config.prefijo_login}/api/v1/auth/login"
         try:
+            h = {
+                "Authorization": "Bearer ",
+                "APP": "INTEGRATOR_API",
+            }
             r = self.sesion.post(
                 url,
+                headers=h,
                 json={self.config.campo_usuario or "email": self.config.usuario,
                       "password": self.config.contrasena},
                 timeout=self.config.timeout_lookup,
@@ -298,6 +303,7 @@ class ClienteProveedor:
 
         try:
             datos = r.json()
+            print(f"{metodo} HTTP {r.status_code} OK", "datos", r)
         except ValueError:
             datos = {}
 
@@ -327,6 +333,7 @@ class ClienteProveedor:
                 cuerpo=datos,
             )
 
+        print(f"{metodo} HTTP {r.status_code} OK", "datos", datos)
         return Respuesta.desde(metodo, r.status_code, datos, crudo=r.text[:4000])
 
     # -- métodos del API --------------------------------------------------
@@ -384,7 +391,7 @@ class ClienteProveedor:
 
     def saldo_merchant(self):
         """
-        Saldo del merchant de EPS en Emida (`GET /api/v1/account/balance`).
+        Saldo del merchant de EPS en Emida (`GET /api/v1/merchants/account/balance`).
 
         Lo ve solo el Super Admin. NO tiene relación con los saldos de la
         red, que el Super Admin asigna a mano (decisión 23). Agrega
@@ -395,7 +402,7 @@ class ClienteProveedor:
         if self.config.merchant_id:
             cabeceras["Merchant-Id"] = str(self.config.merchant_id)
         return self._llamar(
-            "GET", "/api/v1/account/balance", metodo="saldo_merchant",
+            "GET", "/api/v1/merchants/account/balance", metodo="saldo_merchant",
             cabeceras=cabeceras, timeout=self.config.timeout_lookup,
         )
 
@@ -412,7 +419,7 @@ class ClienteProveedor:
     def productos(self):
         """GetProductList: productos asignados al terminal (rate plan)."""
         return self._llamar(
-            "GET", "/api/v1/terminal/products", metodo="productos",
+            "GET", "/api/v1/terminal/products/ext", metodo="productos",
             cabeceras=self._cabeceras(), timeout=self.config.timeout_lookup,
         )
 

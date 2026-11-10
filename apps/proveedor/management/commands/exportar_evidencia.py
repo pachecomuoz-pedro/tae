@@ -15,7 +15,7 @@ IntentoProveedor):
 En Windows (PowerShell), con Docker corriendo. La carpeta se escribe dentro
 del proyecto, así que la ves en el Explorador de Windows:
 
-    docker compose exec web python manage.py exportar_evidencia --desde 2026-11-10 --carpeta evidencias/TA-20261110
+    docker compose exec api python manage.py exportar_evidencia --desde 2026-11-10 --carpeta evidencias/TA-20261110
 
 Usa barras normales (/) en --carpeta: el comando corre dentro del
 contenedor, que es Linux.

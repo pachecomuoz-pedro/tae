@@ -14,7 +14,7 @@ Guía para preparar el ambiente, conectar con el sandbox de Emida y ejecutar los
 2. **Comprueba que la IP de este equipo es la que autorizó axexo:**
    ```powershell
    curl.exe -4 ifconfig.me
-   docker compose exec web python -c "import requests; print(requests.get('https://ifconfig.me/ip', timeout=10).text)"
+   docker compose exec api python -c "import requests; print(requests.get('https://ifconfig.me/ip', timeout=10).text)"
    ```
    Las dos deben coincidir con la IP autorizada. Si no coinciden, desactiva la VPN o el proxy, o pide a axexo que autorice la que salió.
 3. **Comprueba que el puerto responde:**
@@ -58,16 +58,16 @@ Las credenciales nunca se suben al repositorio ni se pegan en chats.
 
 ```powershell
 docker compose up -d --build
-docker compose exec web python manage.py migrate
+docker compose exec api python manage.py migrate
 docker compose ps
 ```
 
-`docker compose ps` debe mostrar `db`, `cache`, `web` y `tareas` arriba. `tareas` es el programador: descarga los productos cada día y reintenta las ventas sin resolver cada 5 minutos.
+`docker compose ps` debe mostrar cinco servicios arriba: `db`, `cache`, `api` (Django), `tareas` y `web` (React, en http://localhost:5173). `tareas` es el programador: descarga los productos cada día y reintenta las ventas sin resolver cada 5 minutos.
 
 Después de cualquier cambio al `.env`:
 
 ```powershell
-docker compose up -d --force-recreate web tareas
+docker compose up -d --force-recreate api tareas
 ```
 
 ## 3. Instalación de primera vez
@@ -75,25 +75,17 @@ docker compose up -d --force-recreate web tareas
 Antes, comprueba la conexión con el paso 4 (diagnóstico). Cuando el login y las consultas respondan:
 
 ```powershell
-docker compose exec web python manage.py instalar
+docker compose exec api python manage.py instalar
 ```
 
 Crea el Super Admin, un administrador, un cliente y una caja; muestra **una vez** sus contraseñas; pide escanear el QR del segundo factor del Super Admin; y trae de Emida el **catálogo real** (ya publicado en la caja) y el **saldo real de EPS**. Anota las contraseñas: cada usuario debe cambiarla al entrar. Si prefieres una contraseña conocida para los cuatro, pon `TAE_CLAVE_INICIAL` en el `.env` antes de correrlo.
 
-El frontend se abre con:
-
-```powershell
-cd web
-npm install
-npm run dev
-```
-
-Entra a http://localhost:5173.
+El frontend ya está corriendo en su contenedor (`web`): entra a http://localhost:5173.
 
 ## 4. Diagnóstico de la conexión
 
 ```powershell
-docker compose exec web python manage.py probar_proveedor --probar-prefijos --evidencia evidencias/TA-AAAAMMDD/01-diagnostico
+docker compose exec api python manage.py probar_proveedor --probar-prefijos --evidencia evidencias/TA-AAAAMMDD/01-diagnostico
 ```
 
 Cómo leer el resultado:
@@ -113,13 +105,13 @@ Con esto ya tienes la evidencia de los casos de consulta para la interfaz: **TR-
 La instalación ya publicó todo lo que Emida lista con monto fijo. Para revisarlo:
 
 ```powershell
-docker compose exec web python manage.py vincular_producto --listar
+docker compose exec api python manage.py vincular_producto --listar
 ```
 
 TX-T-05 pide cinco ventas de **varios productos**: comprueba que haya al menos cinco de tiempo aire de carriers distintos. Si falta alguno (por ejemplo, uno de monto abierto), vincúlalo a mano:
 
 ```powershell
-docker compose exec web python manage.py vincular_producto --product-id 2001 --sku TEL-TAE-100 --nombre 'Telcel Tiempo Aire $100' --carrier Telcel --monto 100
+docker compose exec api python manage.py vincular_producto --product-id 2001 --sku TEL-TAE-100 --nombre 'Telcel Tiempo Aire $100' --carrier Telcel --monto 100
 ```
 
 Con comillas simples, el `$` no se interpreta en PowerShell.
@@ -143,7 +135,7 @@ Anota la hora y el folio de cada venta: con eso se arma la evidencia en el paso 
 | **TX-T-05** Cinco exitosas de varios productos | Cinco ventas con productos distintos | Las cinco aprobadas. En Exposición, el saldo de Emida bajó la suma de las cinco |
 | **TX-T-01 a 03** Validaciones de Invoice-No, accountId y amount | No se pueden provocar desde la plataforma, porque ella misma lo impide: siempre manda Invoice-No y la pantalla no deja vender sin número ni con un monto distinto al del producto | Se documentan como "prevenido por el integrador". Si axexo pide ver la respuesta de Emida, se prueban con su Swagger |
 | **TX-LK-01** Invoice-No duplicado | La plataforma nunca repite un Invoice-No: cada intento usa el siguiente | Evidencia: la secuencia de Invoice-No en `reporte_emida.csv` |
-| **TX-LK-02** Lookup de una existente | `docker compose exec web python manage.py probar_proveedor --lookup <invoice> --evidencia evidencias/TA-AAAAMMDD/TX-LK-02` | `responseCode=0` y el mensaje original |
+| **TX-LK-02** Lookup de una existente | `docker compose exec api python manage.py probar_proveedor --lookup <invoice> --evidencia evidencias/TA-AAAAMMDD/TX-LK-02` | `responseCode=0` y el mensaje original |
 | **TX-LK-03** Lookup de una inexistente | `... probar_proveedor --lookup 99999 --evidencia ...` | Respuesta documentada (404), sin cobro |
 | **TX-LK-04** invoiceNo no numérico | `... probar_proveedor --lookup ABC --evidencia ...` | HTTP 400 |
 | **TX-LK-05** Balance insuficiente | Una venta cuando axexo deja el merchant sin fondos | "Rechazada"; el saldo de la caja no se toca |
@@ -154,7 +146,7 @@ Anota la hora y el folio de cada venta: con eso se arma la evidencia en el paso 
 ## 8. Exportar la evidencia
 
 ```powershell
-docker compose exec web python manage.py exportar_evidencia --desde AAAA-MM-DD --carpeta evidencias/TA-AAAAMMDD/ventas
+docker compose exec api python manage.py exportar_evidencia --desde AAAA-MM-DD --carpeta evidencias/TA-AAAAMMDD/ventas
 ```
 
 Genera:
@@ -173,6 +165,6 @@ Mex\Tk-<ticket>\Scorpion\AAAAMMDD\TA\
 | Síntoma | Qué revisar |
 |---|---|
 | La venta responde 503 "el proveedor no está disponible" | Falló el login con Emida antes de enviar: la venta no salió y el saldo no se tocó. Corre `probar_proveedor` |
-| La venta se queda en "sin resolver" | Es lo correcto si Emida no contestó. `docker compose exec web python manage.py reintentar_pendientes` la vuelve a consultar sin esperar a `tareas` |
+| La venta se queda en "sin resolver" | Es lo correcto si Emida no contestó. `docker compose exec api python manage.py reintentar_pendientes` la vuelve a consultar sin esperar a `tareas` |
 | El catálogo de la caja quedó vacío | Corre `vincular_producto --listar`: si los productos dicen "—", no están vinculados. Si Emida dejó de listarlos, la sincronización pausó sus rutas |
-| Ver qué pasó | `docker compose logs --tail=100 web` y `docker compose logs --tail=50 tareas` |
+| Ver qué pasó | `docker compose logs --tail=100 api` y `docker compose logs --tail=50 tareas` |
