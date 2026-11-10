@@ -226,33 +226,38 @@ if TAE_PROVEEDOR["modo"] == "simulado" and not DEBUG:
 # ---------------------------------------------------------------------------
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
-if not DEBUG:
-    # nginx termina el HTTPS y le avisa a Django con este encabezado.
-    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
-    SECURE_CONTENT_TYPE_NOSNIFF = True
-    # Empieza corto: un HSTS largo mal configurado deja el dominio
-    # inaccesible por HTTP durante todo ese tiempo. Súbelo a 31536000 cuando
-    # el HTTPS lleve unas semanas estable.
-    SECURE_HSTS_SECONDS = int(env("DJANGO_HSTS_SEGUNDOS", "3600"))
-    if SECRET_KEY.startswith("dev-") or "cambiar" in SECRET_KEY:
-        raise RuntimeError("DJANGO_SECRET_KEY de desarrollo con DEBUG apagado")
+# if not DEBUG:
+#     # nginx termina el HTTPS y le avisa a Django con este encabezado.
+#     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+#     SESSION_COOKIE_SECURE = True
+#     CSRF_COOKIE_SECURE = True
+#     SECURE_CONTENT_TYPE_NOSNIFF = True
+#     # Empieza corto: un HSTS largo mal configurado deja el dominio
+#     # inaccesible por HTTP durante todo ese tiempo. Súbelo a 31536000 cuando
+#     # el HTTPS lleve unas semanas estable.
+#     SECURE_HSTS_SECONDS = int(env("DJANGO_HSTS_SEGUNDOS", "3600"))
+#     if SECRET_KEY.startswith("dev-") or "cambiar" in SECRET_KEY:
+#         raise RuntimeError("DJANGO_SECRET_KEY de desarrollo con DEBUG apagado")
 
-# Bitácoras a la salida estándar: Docker las recoge y `docker compose logs`
-# las muestra. Los nombres "tae.*" son los que usa el código.
-LOGGING = {
-    "version": 1,
-    "disable_existing_loggers": False,
-    "formatters": {"simple": {"format": "{asctime} {levelname} {name}: {message}", "style": "{"}},
-    "handlers": {"consola": {"class": "logging.StreamHandler", "formatter": "simple"}},
-    "loggers": {
-        "tae": {"handlers": ["consola"], "level": env("TAE_LOG_NIVEL", "INFO")},
-        "django": {"handlers": ["consola"], "level": "WARNING"},
-    },
-}
+# # Bitácoras a la salida estándar: Docker las recoge y `docker compose logs`
+# # las muestra. Los nombres "tae.*" son los que usa el código.
+# LOGGING = {
+#     "version": 1,
+#     "disable_existing_loggers": False,
+#     "formatters": {"simple": {"format": "{asctime} {levelname} {name}: {message}", "style": "{"}},
+#     "handlers": {"consola": {"class": "logging.StreamHandler", "formatter": "simple"}},
+#     "loggers": {
+#         "tae": {"handlers": ["consola"], "level": env("TAE_LOG_NIVEL", "INFO")},
+#         "django": {"handlers": ["consola"], "level": "WARNING"},
+#     },
+# }
 
-# En las pruebas, silencio: los avisos esperados (timeouts emulados) no deben
-# enterrar el resultado de la suite.
-if "test" in sys.argv:
-    LOGGING["loggers"]["tae"]["level"] = "CRITICAL"
+# # En las pruebas, silencio: los avisos esperados (timeouts emulados) no deben
+# # enterrar el resultado de la suite.
+# if "test" in sys.argv:
+#     LOGGING["loggers"]["tae"]["level"] = "CRITICAL"
+
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+CSRF_TRUSTED_ORIGINS = ["https://tae-uat.epsolutions.mx"]
