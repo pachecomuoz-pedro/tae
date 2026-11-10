@@ -47,6 +47,11 @@ CSRF_TRUSTED_ORIGINS = [
     ).split(",") if o
 ]
 
+SESSION_COOKIE_SECURE = env("COOKIES_SEGURAS", "true").lower() == "true"
+CSRF_COOKIE_SECURE = SESSION_COOKIE_SECURE
+SECURE_SSL_REDIRECT = env("FORZAR_HTTPS", "false").lower() == "true"
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in env("CSRF_TRUSTED_ORIGINS").split(",") if o.strip()]
+
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.auth",
@@ -256,8 +261,3 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 # # enterrar el resultado de la suite.
 # if "test" in sys.argv:
 #     LOGGING["loggers"]["tae"]["level"] = "CRITICAL"
-
-SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-SESSION_COOKIE_SECURE = True
-CSRF_COOKIE_SECURE = True
-CSRF_TRUSTED_ORIGINS = ["https://tae-uat.epsolutions.mx"]
