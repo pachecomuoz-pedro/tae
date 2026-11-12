@@ -31,7 +31,63 @@ log = logging.getLogger("tae.catalogo")
 # nombres más probables. Lo que no se reconoce queda igual en `datos`.
 CAMPOS_ID = ("productId", "id", "productID", "product_id")
 CAMPOS_DESCRIPCION = ("description", "productDescription", "name", "productName")
-CAMPOS_CARRIER = ("carrierName", "carrier", "carrierDescription", "carrierId")
+CAMPOS_CARRIER = (
+    "carrierName", "carrier", "carrierDescription", "carrier_name", "carrierDesc",
+    "operator", "operatorName", "brand", "brandName", "providerName", "carrierId",
+)
+
+# Cuando Emida no manda la compañía en un campo propio, casi siempre viene en
+# la descripción ("PRUEBA Recarga Movistar $10"). Se busca la marca ahí, en
+# este orden: el primero que aparezca gana. Las claves van en minúsculas y
+# sin acentos; el valor es como se muestra en la caja.
+MARCAS = (
+    ("telcel", "Telcel"),
+    ("movistar", "Movistar"),
+    ("at&t", "AT&T"), ("att ", "AT&T"), ("at t ", "AT&T"),
+    ("unefon", "Unefon"),
+    ("bait", "Bait"),
+    ("virgin", "Virgin Mobile"),
+    ("weex", "Weex"),
+    ("altan", "Altan"),
+    ("pillofon", "Pillofon"),
+    ("oui", "OUI"),
+    ("flash mobile", "Flash Mobile"),
+    ("diri", "Diri"),
+    ("izzi", "izzi"),
+    ("cfe", "CFE"),
+    ("telmex", "Telmex"),
+    ("totalplay", "Totalplay"),
+    ("megacable", "Megacable"),
+    ("sky", "SKY"),
+    ("dish", "Dish"),
+    ("netflix", "Netflix"),
+    ("spotify", "Spotify"),
+    ("xbox", "Xbox"),
+    ("playstation", "PlayStation"),
+    ("nintendo", "Nintendo"),
+    ("google play", "Google Play"),
+    ("amazon", "Amazon"),
+)
+
+
+def inferir_carrier(*textos):
+    """
+    La marca que aparece en el texto, o "" si ninguna. Se busca palabra por
+    palabra (con espacios alrededor) para que "bait" no coincida dentro de
+    otra palabra.
+    """
+    import unicodedata
+
+    texto = " ".join(str(t or "") for t in textos).lower()
+    texto = "".join(
+        c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn"
+    )
+    relleno = f" {texto.replace('/', ' ').replace('-', ' ').replace('$', ' ')} "
+    for clave, nombre in MARCAS:
+        aguja = clave if clave.endswith(" ") else f"{clave} "
+        if f" {aguja}" in relleno or (clave.endswith(" ") and f" {clave}" in relleno):
+            return nombre
+    return ""
 CAMPOS_MONTO = ("amount", "price", "faceValue", "denomination", "productAmount")
 CAMPOS_LISTA = ("items", "products", "data", "content", "productList", "result")
 
@@ -126,7 +182,11 @@ def sincronizar(inquilino, cliente, *, proveedor_clave="axexo"):
             product_id=pid,
             defaults={
                 "descripcion": str(_primero(item, CAMPOS_DESCRIPCION) or "")[:200],
-                "carrier": str(_primero(item, CAMPOS_CARRIER) or "")[:80],
+                "carrier": str(
+                    _primero(item, CAMPOS_CARRIER)
+                    or inferir_carrier(_primero(item, CAMPOS_DESCRIPCION))
+                    or ""
+                )[:80],
                 "monto": _monto(_primero(item, CAMPOS_MONTO)),
                 "datos": item,
                 "flujo": flujos.get(pid),
@@ -195,6 +255,44 @@ def _tipo_de(oferta):
     return TipoProducto.TIEMPO_AIRE
 
 
+def _carrier_legible(oferta):
+    """
+    El carrier guardado, salvo que sea solo un número (`carrierId`): un id
+    no le dice nada al cajero, y para eso es mejor deducirlo del nombre.
+    """
+    valor = (oferta.carrier or "").strip()
+    return "" if valor.isdigit() else valor
+
+
+def reasignar_carriers(inquilino):
+    """
+    Mueve a su compañía los productos que quedaron en "Otros" porque Emida
+    no mandó el carrier. Solo cambia el carrier, nunca el nombre ni el
+    precio, y no toca lo que alguien ya acomodó a mano en otra compañía.
+
+    Devuelve [(sku, compañía)].
+    """
+    from django.utils.text import slugify
+
+    from .models import Carrier, ProductoLogico
+
+    movidos = []
+    for producto in ProductoLogico.objects.filter(
+        inquilino=inquilino, carrier__clave="otros"
+    ).select_related("carrier"):
+        nombre = inferir_carrier(producto.nombre)
+        if not nombre:
+            continue
+        carrier, _ = Carrier.objects.get_or_create(
+            inquilino=inquilino, clave=slugify(nombre)[:40] or "otros",
+            defaults={"nombre": nombre, "tipo": producto.carrier.tipo},
+        )
+        producto.carrier = carrier
+        producto.save(update_fields=["carrier"])
+        movidos.append((producto.sku, nombre))
+    return movidos
+
+
 @transaction.atomic
 def vincular_todo(inquilino, *, proveedor_clave="axexo"):
     """
@@ -224,7 +322,7 @@ def vincular_todo(inquilino, *, proveedor_clave="axexo"):
         if oferta.monto is None or oferta.monto <= 0:
             sin_monto.append(oferta.product_id)
             continue
-        nombre_carrier = oferta.carrier or "Otros"
+        nombre_carrier = _carrier_legible(oferta) or inferir_carrier(oferta.descripcion) or "Otros"
         tipo = _tipo_de(oferta)
         carrier, _ = Carrier.objects.get_or_create(
             inquilino=inquilino, clave=(slugify(nombre_carrier) or "otros")[:40],

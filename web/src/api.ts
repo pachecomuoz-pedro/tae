@@ -23,6 +23,8 @@ export class ErrorAPI extends Error {
     switch (this.clave) {
       case "saldo":
         return "Pide saldo a tu cliente antes de volver a intentar.";
+      case "retencion":
+        return "Hay saldo retenido por una corrección de fondeo. Se libera cuando la red reciba fondeo.";
       case "permiso":
         return "Si crees que sí deberías poder, habla con quien te dio de alta.";
       case "segundo_factor":
@@ -138,9 +140,21 @@ export interface UsuarioRed {
   correo: string;
   nombre: string;
   debe_cambiar_contrasena: boolean;
+  /** false si su acceso está desactivado. */
+  activo: boolean;
 }
 
-export interface FilaRed {
+/** Disponible y Saldo red, como los calcula el servidor (decisión 27). */
+export interface DosSaldos {
+  /** Lo que el titular puede mover hoy sin tocar a nadie más. */
+  disponible?: string;
+  /** Todo lo que queda por vender en su rama. */
+  saldo_red?: string;
+  /** Lo que falta por liquidar de correcciones de fondeo. */
+  retenido?: string;
+}
+
+export interface FilaRed extends DosSaldos {
   tipo: TipoRed;
   uuid: string;
   nombre: string;
@@ -151,6 +165,9 @@ export interface FilaRed {
   saldo?: string;
   limite?: string | null;
   modo_bolsa?: string;
+  /** Solo cajas: si hoy puede vender y, si no, por qué. */
+  puede_vender?: boolean;
+  motivo_no_vende?: string;
   usuario: UsuarioRed | null;
 }
 
@@ -162,6 +179,8 @@ export interface Alta {
   estado: string;
   usuario: UsuarioRed | null;
   credencial_temporal: string | null;
+  /** Por ejemplo: una caja en bolsa asignada sin límite no podrá vender. */
+  advertencia?: string;
 }
 
 export interface Pendiente {
@@ -191,15 +210,39 @@ export interface Producto {
   codigo_barras: string;
 }
 
-export interface Saldo {
+export interface Saldo extends DosSaldos {
   titular: string;
   saldo: string | null;
   reservado?: string;
-  disponible?: string;
   limites_asignados?: string;
   retirable?: string;
   modo_bolsa?: string;
   mi_caja?: { nombre: string; limite: string | null; disponible: string | null };
+  /** Solo cajas: si puede vender ahora y, si no, por qué (para avisar ANTES de capturar). */
+  venta?: { puede: boolean; motivo: string };
+}
+
+export interface Retencion {
+  uuid: string;
+  tipo: "administrador" | "cliente";
+  titular: string;
+  titular_uuid: string;
+  monto: string;
+  pendiente: string;
+  estado: "activa" | "liquidada" | "cancelada";
+  motivo: string;
+  nota: string;
+  autorizado_por: string;
+  folio_origen: string;
+  creado: string;
+  saldo_red: string;
+}
+
+export interface RetiroEPS extends DosSaldos {
+  titular: string;
+  retirado: string;
+  folio: string | null;
+  retencion: Retencion | null;
 }
 
 export interface ResultadoVenta {
@@ -209,6 +252,9 @@ export interface ResultadoVenta {
   monto: string;
   detalle: string;
   autorizacion: string;
+  /** Lo que dijo el proveedor y su código: el motivo de un rechazo. */
+  mensaje: string;
+  codigo: string;
 }
 
 export interface PuntoVenta {
@@ -221,7 +267,7 @@ export interface PuntoVenta {
   limite: string | null;
 }
 
-export interface ClienteFila {
+export interface ClienteFila extends DosSaldos {
   uuid: string;
   nombre: string;
   rfc: string;
@@ -262,10 +308,31 @@ export const api = {
   }) => pedir<Alta>("/puntos-venta/alta", json(datos)),
 
   fondearAdministrador: (administrador: string, monto: string) =>
-    pedir<{ folio: string; saldo: string }>("/administradores/fondeo", json({ administrador, monto })),
+    pedir<{ folio: string; saldo: string; liquidaciones: string[] } & DosSaldos>(
+      "/administradores/fondeo", json({ administrador, monto }),
+    ),
 
   fondearCliente: (cliente: string, monto: string) =>
-    pedir<{ folio: string; saldo: string }>("/clientes/fondeo", json({ cliente, monto })),
+    pedir<{ folio: string; saldo: string; liquidaciones: string[] } & DosSaldos>(
+      "/clientes/fondeo", json({ cliente, monto }),
+    ),
+
+  /** Super Admin: regresa saldo a EPS. Con `retener_faltante`, el resto queda retenido en la red. */
+  retirarAEPS: (datos: {
+    tipo: "administrador" | "cliente"; uuid: string; monto: string; motivo: string;
+    nota: string; retener_faltante: boolean; folio_origen?: string;
+  }) => pedir<RetiroEPS>("/retiros/eps", json(datos)),
+
+  retenciones: (todas = false) => pedir<Retencion[]>("/retenciones" + (todas ? "?todas=1" : "")),
+
+  cancelarRetencion: (uuid: string, nota: string) =>
+    pedir<Retencion>("/retenciones/cancelar", json({ uuid, nota })),
+
+  suspension: (tipo: TipoRed, uuid: string, reactivar: boolean) =>
+    pedir<{ estado: string }>("/red/suspension", json({ tipo, uuid, reactivar })),
+
+  acceso: (usuario: string, activo: boolean) =>
+    pedir<UsuarioRed>("/usuarios/acceso", json({ usuario, activo })),
 
   aprobaciones: () => pedir<Pendiente[]>("/aprobaciones"),
 

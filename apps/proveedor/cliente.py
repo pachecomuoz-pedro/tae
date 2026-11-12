@@ -184,6 +184,9 @@ class Respuesta:
 
     @classmethod
     def desde(cls, metodo, http, datos, crudo=""):
+        # El mensaje del sobre (`message`) se guarda antes de desenvolver:
+        # cuando Emida rechaza con `data: null`, es lo único que explica por qué.
+        sobre = datos.get("message") if isinstance(datos, dict) else ""
         datos = desenvolver(datos)
         cuerpo = datos if isinstance(datos, dict) else {}
         return cls(
@@ -196,7 +199,10 @@ class Respuesta:
             control_no=str(cuerpo.get("controlNo") or ""),
             response_code=str(cuerpo.get("responseCode") or ""),
             h2h_result_code=str(cuerpo.get("h2hResultCode") or ""),
-            mensaje=str(cuerpo.get("responseMessage") or cuerpo.get("detail") or ""),
+            mensaje=str(
+                cuerpo.get("responseMessage") or cuerpo.get("detail")
+                or cuerpo.get("message") or sobre or ""
+            ),
             crudo=crudo,
         )
 
@@ -303,7 +309,6 @@ class ClienteProveedor:
 
         try:
             datos = r.json()
-            print(f"{metodo} HTTP {r.status_code} OK", "datos", r)
         except ValueError:
             datos = {}
 
@@ -333,7 +338,6 @@ class ClienteProveedor:
                 cuerpo=datos,
             )
 
-        print(f"{metodo} HTTP {r.status_code} OK", "datos", datos)
         return Respuesta.desde(metodo, r.status_code, datos, crudo=r.text[:4000])
 
     # -- métodos del API --------------------------------------------------

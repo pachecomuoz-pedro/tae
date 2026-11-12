@@ -13,6 +13,7 @@ import { ErrorAPI, Perfil, Saldo, api, pesos } from "./api";
 import { PuntosVenta } from "./Cliente";
 import { Exposicion } from "./Exposicion";
 import { Aprobaciones, CambiarContrasena, Red } from "./Red";
+import { SaldoRed } from "./SaldoRed";
 import { Venta } from "./Venta";
 
 /**
@@ -41,8 +42,10 @@ function pantallasDe(perfil: Perfil): Pantalla[] {
       { clave: "exposicion", titulo: "Exposición" },
       { clave: "red", titulo: "Usuarios de la red" },
       { clave: "aprobaciones", titulo: "Aprobaciones" },
-      { clave: "traspaso", titulo: "Traspaso de saldo" },
-      { clave: "retiro", titulo: "Retiro de saldo" },
+      // El Super Admin abona y retira desde EPS en una sola pantalla. No usa
+      // el traspaso del administrador: ese descuenta de la bolsa del
+      // administrador, y desde aquí el dinero sale de (o vuelve a) EPS.
+      { clave: "saldo_red", titulo: "Abonos y retiros" },
     ];
   }
   return [
@@ -139,16 +142,7 @@ export function App() {
               {pantallasDe(perfil).find((p) => p.clave === pantalla)?.titulo ?? "Tablero"}
             </h1>
           </div>
-          {saldo?.saldo && (
-            <div className="text-right">
-              <p className="text-[11px] uppercase tracking-wide text-apagado">
-                {saldo.titular}
-              </p>
-              <p className="cifras font-display text-2xl font-bold text-primario">
-                {pesos(saldo.disponible ?? saldo.saldo)}
-              </p>
-            </div>
-          )}
+          <Cifras perfil={perfil} saldo={saldo} />
         </header>
 
         <main className="flex-1 overflow-y-auto p-5">
@@ -165,9 +159,58 @@ export function App() {
             <Clientes modo="retiro" alCambiar={refrescarSaldo} />
           )}
           {pantalla === "exposicion" && <Exposicion />}
+          {pantalla === "saldo_red" && <SaldoRed alCambiar={refrescarSaldo} />}
           {pantalla === "red" && <Red perfil={perfil} alCambiar={refrescarSaldo} />}
           {pantalla === "aprobaciones" && <Aprobaciones alCambiar={refrescarSaldo} />}
         </main>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Las cifras del encabezado. Cada rol ve la suya:
+ *
+ * - Caja: lo que ELLA puede vender. No la bolsa de su cliente: ese número
+ *   no le sirve para vender y lo confunde ("tengo saldo y no me deja").
+ * - Administrador y Cliente: Disponible (lo que mueven ellos) y Saldo red
+ *   (lo que queda por vender en toda su rama), más lo retenido si hay.
+ */
+function Cifras({ perfil, saldo }: { perfil: Perfil; saldo: Saldo | null }) {
+  if (!saldo || saldo.saldo === null || saldo.saldo === undefined) return null;
+
+  if (perfil.capacidades.vender) {
+    return (
+      <div className="text-right" data-prueba="cifra-caja">
+        <p className="text-[11px] uppercase tracking-wide text-apagado">
+          {saldo.mi_caja?.nombre ?? "Mi caja"} · disponible para vender
+        </p>
+        <p className="cifras font-display text-2xl font-bold text-primario">
+          {pesos(saldo.mi_caja?.disponible ?? saldo.disponible)}
+        </p>
+      </div>
+    );
+  }
+
+  const retenido = Number(saldo.retenido ?? 0);
+  return (
+    <div className="flex items-end gap-6 text-right" data-prueba="dos-saldos">
+      <div>
+        <p className="text-[11px] uppercase tracking-wide text-apagado">Disponible</p>
+        <p className="cifras font-display text-2xl font-bold text-primario">
+          {pesos(saldo.disponible)}
+        </p>
+      </div>
+      <div className="border-l border-borde pl-6">
+        <p className="text-[11px] uppercase tracking-wide text-apagado">Saldo red</p>
+        <p className="cifras font-display text-2xl font-bold text-tinta">
+          {pesos(saldo.saldo_red)}
+        </p>
+        {retenido > 0 && (
+          <p className="mt-0.5 rounded-full bg-ambar-fondo px-2 py-0.5 text-[11px] font-bold text-ambar-texto">
+            {pesos(retenido)} retenidos
+          </p>
+        )}
       </div>
     </div>
   );

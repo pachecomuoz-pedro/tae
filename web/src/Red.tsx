@@ -23,6 +23,12 @@ const NOMBRE_TIPO: Record<TipoRed, string> = {
   punto_venta: "Punto de venta",
 };
 
+const PLURAL_TIPO: Record<TipoRed, string> = {
+  administrador: "Administradores",
+  cliente: "Clientes",
+  punto_venta: "Puntos de venta",
+};
+
 /** Colores de estado, los mismos del canvas. */
 function Estado({ estado }: { estado: string }) {
   const estilos: Record<string, string> = {
@@ -227,6 +233,8 @@ export function Red({ perfil, alCambiar }: { perfil: Perfil; alCambiar: () => vo
   const [altaAbierta, setAltaAbierta] = useState(false);
   const [restablecer, setRestablecer] = useState<FilaRed | null>(null);
   const [fondear, setFondear] = useState<FilaRed | null>(null);
+  const [suspender, setSuspender] = useState<FilaRed | null>(null);
+  const [acceso, setAcceso] = useState<FilaRed | null>(null);
 
   const cargar = () => {
     setError(null);
@@ -247,7 +255,7 @@ export function Red({ perfil, alCambiar }: { perfil: Perfil; alCambiar: () => vo
                   className={"rounded-xl border px-4 py-2.5 text-sm font-semibold " +
                     (tipo === t ? "border-primario bg-primario text-white"
                                 : "border-borde bg-white text-tinta-dos")}>
-            {NOMBRE_TIPO[t]}s
+            {PLURAL_TIPO[t]}
           </button>
         ))}
         <input value={buscar} onChange={(e) => setBuscar(e.target.value)}
@@ -268,7 +276,14 @@ export function Red({ perfil, alCambiar }: { perfil: Perfil; alCambiar: () => vo
               <th className="px-4 py-3">{NOMBRE_TIPO[tipo]}</th>
               <th className="px-4 py-3">Depende de</th>
               <th className="px-4 py-3">Estado</th>
-              <th className="px-4 py-3 text-right">{tipo === "punto_venta" ? "Límite" : "Saldo"}</th>
+              {tipo === "punto_venta" ? (
+                <th className="px-4 py-3 text-right">Límite</th>
+              ) : (
+                <>
+                  <th className="px-4 py-3 text-right">Disponible</th>
+                  <th className="px-4 py-3 text-right">Saldo red</th>
+                </>
+              )}
               <th className="px-4 py-3"></th>
             </tr>
           </thead>
@@ -286,6 +301,11 @@ export function Red({ perfil, alCambiar }: { perfil: Perfil; alCambiar: () => vo
                       {f.usuario?.correo ?? "Sin usuario"}
                       {f.usuario?.debe_cambiar_contrasena && " · aún no cambia su contraseña"}
                     </span>
+                    {f.usuario && !f.usuario.activo && (
+                      <span className="mt-1 inline-block rounded-full bg-suave px-2 py-0.5 text-[11px] font-bold text-tinta-dos">
+                        Acceso desactivado
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-tinta-dos">{f.padre ?? "EPS"}</td>
                   <td className="px-4 py-3">
@@ -293,12 +313,33 @@ export function Red({ perfil, alCambiar }: { perfil: Perfil; alCambiar: () => vo
                     {f.motivo_rechazo && (
                       <span className="mt-1 block text-xs text-apagado">{f.motivo_rechazo}</span>
                     )}
+                    {f.tipo === "punto_venta" && f.puede_vender === false &&
+                     ["activo"].includes(f.estado) && (
+                      <span className="mt-1 block max-w-[220px] text-xs font-semibold text-alerta-oscuro"
+                            data-prueba="no-vende">
+                        No puede vender: {f.motivo_no_vende}
+                      </span>
+                    )}
                   </td>
-                  <td className="cifras px-4 py-3 text-right font-display font-bold">
-                    {tipo === "punto_venta"
-                      ? (f.modo_bolsa === "compartida" ? "Bolsa del cliente" : pesos(f.limite))
-                      : pesos(f.saldo)}
-                  </td>
+                  {tipo === "punto_venta" ? (
+                    <td className="cifras px-4 py-3 text-right font-display font-bold">
+                      {f.modo_bolsa === "compartida" ? "Bolsa del cliente" : pesos(f.limite)}
+                    </td>
+                  ) : (
+                    <>
+                      <td className="cifras px-4 py-3 text-right font-display font-bold text-primario">
+                        {pesos(f.disponible)}
+                      </td>
+                      <td className="cifras px-4 py-3 text-right font-display font-bold">
+                        {pesos(f.saldo_red)}
+                        {Number(f.retenido ?? 0) > 0 && (
+                          <span className="mt-0.5 block text-[11px] font-bold text-ambar-texto">
+                            {pesos(f.retenido)} retenidos
+                          </span>
+                        )}
+                      </td>
+                    </>
+                  )}
                   <td className="space-x-2 whitespace-nowrap px-4 py-3 text-right">
                     {perfil.rol === "super_admin" && ["aprobado", "activo"].includes(f.estado) &&
                      !(f.tipo === "punto_venta" && f.modo_bolsa === "compartida") && (
@@ -314,12 +355,27 @@ export function Red({ perfil, alCambiar }: { perfil: Perfil; alCambiar: () => vo
                         Restablecer contraseña
                       </button>
                     )}
+                    {puedeSuspender(perfil, f) && (
+                      <button type="button" onClick={() => setSuspender(f)} data-prueba="suspender"
+                              className={"rounded-lg border px-3 py-1.5 text-xs font-bold " +
+                                (f.estado === "suspendido"
+                                  ? "border-exito-borde bg-exito-fondo text-exito-oscuro"
+                                  : "border-[#F3C9C6] bg-white text-alerta-oscuro")}>
+                        {f.estado === "suspendido" ? "Reactivar" : "Suspender"}
+                      </button>
+                    )}
+                    {!!f.usuario && f.usuario.uuid !== perfil.uuid && perfil.capacidades.cambiar_acceso && (
+                      <button type="button" onClick={() => setAcceso(f)} data-prueba="acceso"
+                              className="rounded-lg border border-campo bg-white px-3 py-1.5 text-xs font-bold text-tinta-dos">
+                        {f.usuario.activo ? "Desactivar acceso" : "Reactivar acceso"}
+                      </button>
+                    )}
                   </td>
                 </tr>
               );
             })}
             {visibles.length === 0 && (
-              <tr><td colSpan={5} className="px-4 py-10 text-center text-apagado">
+              <tr><td colSpan={6} className="px-4 py-10 text-center text-apagado">
                 Sin resultados.
               </td></tr>
             )}
@@ -336,6 +392,13 @@ export function Red({ perfil, alCambiar }: { perfil: Perfil; alCambiar: () => vo
       )}
       {fondear && (
         <FondeoModal fila={fondear} alCerrar={() => { setFondear(null); cargar(); alCambiar(); }} />
+      )}
+      {suspender && (
+        <SuspensionModal fila={suspender}
+                         alCerrar={() => { setSuspender(null); cargar(); alCambiar(); }} />
+      )}
+      {acceso && (
+        <AccesoModal fila={acceso} alCerrar={() => { setAcceso(null); cargar(); }} />
       )}
     </div>
   );
@@ -407,6 +470,11 @@ function AltaModal({ tipo, perfil, alCerrar }: {
         <p className="mb-4 text-sm">
           <b>{hecho.nombre}</b> quedó {hecho.estado === "pendiente" ? "pendiente de aprobación" : "activo"}.
         </p>
+        {hecho.advertencia && (
+          <p className="mb-4 rounded-xl bg-ambar-fondo p-3 text-sm text-ambar-texto" data-prueba="advertencia">
+            {hecho.advertencia}
+          </p>
+        )}
         {hecho.credencial_temporal && hecho.usuario ? (
           <Credencial correo={hecho.usuario.correo} temporal={hecho.credencial_temporal}
                       alCerrar={alCerrar} />
@@ -596,6 +664,114 @@ function FondeoModal({ fila, alCerrar }: { fila: FilaRed; alCerrar: () => void }
           </div>
         </div>
       )}
+    </Modal>
+  );
+}
+
+/**
+ * Quién puede suspender qué. El servidor lo vuelve a verificar; esto solo
+ * evita pintar un botón que va a dar 403. Cada nivel sobre los de abajo.
+ */
+function puedeSuspender(perfil: Perfil, f: FilaRed): boolean {
+  if (!["activo", "aprobado", "suspendido"].includes(f.estado)) return false;
+  if (perfil.rol === "super_admin") return true;
+  if (perfil.rol === "administrador") return f.tipo !== "administrador";
+  if (perfil.rol === "cliente") return f.tipo === "punto_venta";
+  return false;
+}
+
+const EFECTO_SUSPENSION: Record<TipoRed, string> = {
+  administrador:
+    "Deja de traspasar, sus clientes no reciben saldo y ninguna caja de su red vende. " +
+    "No cambia el estado de sus clientes: al reactivarlo, cada uno queda como estaba.",
+  cliente:
+    "Deja de recibir saldo y todas sus cajas dejan de vender. Al reactivarlo, cada caja " +
+    "vuelve al estado que tenía; una caja suspendida a mano sigue suspendida.",
+  punto_venta:
+    "Solo esta caja deja de vender. Sus cajeros pueden entrar, pero no vender.",
+};
+
+function SuspensionModal({ fila, alCerrar }: { fila: FilaRed; alCerrar: () => void }) {
+  const reactivar = fila.estado === "suspendido";
+  const [error, setError] = useState<ErrorAPI | null>(null);
+  const [enviando, setEnviando] = useState(false);
+
+  async function aplicar() {
+    setEnviando(true);
+    setError(null);
+    try {
+      await api.suspension(fila.tipo, fila.uuid, reactivar);
+      alCerrar();
+    } catch (e) {
+      setError(e as ErrorAPI);
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  return (
+    <Modal titulo={`${reactivar ? "Reactivar" : "Suspender"} a ${fila.nombre}`} alCerrar={alCerrar}>
+      <div className="space-y-4">
+        <p className="text-sm">
+          {reactivar
+            ? `${fila.nombre} vuelve a operar. Las ventas y saldos que tenía siguen igual.`
+            : EFECTO_SUSPENSION[fila.tipo]}
+        </p>
+        {!reactivar && (
+          <p className="rounded-xl bg-ambar-fondo p-3 text-xs">
+            Las ventas que ya salieron hacia el proveedor terminan solas en los siguientes
+            segundos. El saldo no se mueve: si hay que recuperarlo, se retira aparte.
+          </p>
+        )}
+        {error && <Aviso error={error} />}
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={alCerrar}
+                  className="rounded-xl border border-campo px-5 py-3 text-sm font-bold">Cancelar</button>
+          <button type="button" onClick={aplicar} disabled={enviando} data-prueba="confirmar-suspension"
+                  className={"rounded-xl px-5 py-3 text-sm font-bold text-white disabled:opacity-60 " +
+                    (reactivar ? "bg-exito-oscuro" : "bg-alerta-oscuro")}>
+            {enviando ? "Aplicando…" : reactivar ? "Reactivar" : "Suspender"}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function AccesoModal({ fila, alCerrar }: { fila: FilaRed; alCerrar: () => void }) {
+  const usuario = fila.usuario!;
+  const activar = !usuario.activo;
+  const [error, setError] = useState<ErrorAPI | null>(null);
+
+  async function aplicar() {
+    setError(null);
+    try {
+      await api.acceso(usuario.uuid, activar);
+      alCerrar();
+    } catch (e) {
+      setError(e as ErrorAPI);
+    }
+  }
+
+  return (
+    <Modal titulo={`${activar ? "Reactivar" : "Desactivar"} acceso`} alCerrar={alCerrar}>
+      <div className="space-y-4">
+        <p className="text-sm">
+          {activar
+            ? <><b>{usuario.nombre}</b> ({usuario.correo}) podrá volver a entrar con su contraseña.</>
+            : <><b>{usuario.nombre}</b> ({usuario.correo}) deja de poder entrar y se cierran sus
+                sesiones abiertas. {fila.nombre} no cambia de estado.</>}
+        </p>
+        {error && <Aviso error={error} />}
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={alCerrar}
+                  className="rounded-xl border border-campo px-5 py-3 text-sm font-bold">Cancelar</button>
+          <button type="button" onClick={aplicar} data-prueba="confirmar-acceso"
+                  className="rounded-xl bg-primario px-5 py-3 text-sm font-bold text-white">
+            {activar ? "Reactivar acceso" : "Desactivar acceso"}
+          </button>
+        </div>
+      </div>
     </Modal>
   );
 }

@@ -17,6 +17,7 @@ atorada molesta a un tendero; un doble cobro le cuesta a alguien.
 
 Decisión que gobierna este archivo: 10 (docs/DECISIONES.md).
 """
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -53,6 +54,10 @@ class Cierre:
     respuesta: Respuesta = None
     intentos: int = 0
     detalle: str = ""
+    # Lo que dijo el proveedor: su texto y su código. Es lo que la pantalla
+    # le muestra al cajero en un rechazo, y lo que soporte necesita.
+    mensaje: str = ""
+    codigo: str = ""
 
     @property
     def cobrada(self):
@@ -63,15 +68,27 @@ class Cierre:
         return self.desenlace == Desenlace.SIN_RESOLVER
 
 
-def _registrar(registro, *, tipo, respuesta=None, error=""):
+def _registrar(registro, *, tipo, respuesta=None, error="", rechazo=None):
+    """
+    Una fila por llamada al proveedor. En un rechazo 4xx también se guarda
+    el cuerpo que mandó el proveedor: es donde viene el motivo, y sin él no
+    hay forma de diagnosticar después (`manage.py ver_venta FOLIO`).
+    """
+    cuerpo = getattr(respuesta, "crudo", "") or ""
+    http = getattr(respuesta, "http", 0) or 0
+    codigo = getattr(respuesta, "response_code", "") or ""
+    if rechazo is not None:
+        cuerpo = json.dumps(rechazo.cuerpo, ensure_ascii=False, default=str)
+        http = rechazo.http or 0
+        codigo = rechazo.codigo or ""
     IntentoProveedor.objects.create(
         envio=registro,
         tipo=tipo,
-        http=getattr(respuesta, "http", 0) or 0,
-        response_code=getattr(respuesta, "response_code", "") or "",
+        http=http,
+        response_code=codigo,
         h2h_result_code=getattr(respuesta, "h2h_result_code", "") or "",
         aprobada=bool(getattr(respuesta, "aprobada", False)),
-        cuerpo=(getattr(respuesta, "crudo", "") or "")[:4000],
+        cuerpo=cuerpo[:4000],
         error=error[:500],
     )
 
@@ -110,11 +127,12 @@ def cerrar_venta(cliente, reserva, *, account_id, product_id, dormir=time.sleep)
     except RechazoProveedor as e:
         # Rechazo explícito: la venta no ocurrió. 400, 404, 422 y el 401 ya
         # vienen por aquí. Liberar es seguro porque el proveedor lo dijo.
-        _registrar(registro, tipo="envio", error=str(e))
+        _registrar(registro, tipo="envio", error=str(e), rechazo=e)
         services.liberar(reserva)
         return _cerrar(
             registro, Desenlace.RECHAZADA, reserva,
             detalle=f"HTTP {e.http}: {e}", intentos=0,
+            mensaje=str(e), codigo=e.codigo or f"HTTP {e.http}",
         )
 
     except NoAutenticado as e:
@@ -164,7 +182,7 @@ def cerrar_venta(cliente, reserva, *, account_id, product_id, dormir=time.sleep)
         except RechazoProveedor as e:
             if e.http == 404:
                 # El proveedor no conoce ese Invoice-No: la venta nunca entró.
-                _registrar(registro, tipo="lookup", error=str(e))
+                _registrar(registro, tipo="lookup", error=str(e), rechazo=e)
                 services.liberar(reserva)
                 return _cerrar(
                     registro, Desenlace.RECHAZADA, reserva,
@@ -202,15 +220,17 @@ def _resolver(registro, reserva, respuesta, *, intentos):
         )
 
     services.liberar(reserva)
+    codigo = respuesta.response_code or "—"
     return _cerrar(
         registro, Desenlace.RECHAZADA, reserva, respuesta=respuesta,
         intentos=intentos,
-        detalle=f"responseCode {respuesta.response_code or '—'}",
+        detalle=f"{respuesta.mensaje or 'Sin mensaje'} (responseCode {codigo})",
     )
 
 
 @transaction.atomic
-def _cerrar(registro, desenlace, reserva, *, respuesta=None, intentos=0, detalle=""):
+def _cerrar(registro, desenlace, reserva, *, respuesta=None, intentos=0, detalle="",
+            mensaje="", codigo=""):
     registro.desenlace = desenlace
     registro.intentos = intentos
     registro.detalle = detalle[:500]
@@ -223,9 +243,12 @@ def _cerrar(registro, desenlace, reserva, *, respuesta=None, intentos=0, detalle
     registro.save()
 
     reserva.refresh_from_db()
+    if respuesta is not None:
+        mensaje = mensaje or respuesta.mensaje
+        codigo = codigo or respuesta.response_code
     return Cierre(
         desenlace=desenlace, reserva=reserva, respuesta=respuesta,
-        intentos=intentos, detalle=detalle,
+        intentos=intentos, detalle=detalle, mensaje=mensaje or "", codigo=codigo or "",
     )
 
 

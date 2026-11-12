@@ -38,6 +38,9 @@ urlpatterns = [
     path("clientes/suspension", vistas.suspender),
     path("traspasos", vistas.traspasar),
     path("retiros", vistas.retirar),
+    path("retiros/eps", vistas_red.retirar_a_eps),
+    path("retenciones", vistas_red.retenciones),
+    path("retenciones/cancelar", vistas_red.cancelar_retencion),
 
     # La red: administradores, aprobaciones y restablecimiento por el superior
     path("administradores/alta", vistas_red.alta_administrador),
@@ -47,6 +50,8 @@ urlpatterns = [
     path("aprobaciones/aprobar", vistas_red.aprobar),
     path("aprobaciones/rechazar", vistas_red.rechazar),
     path("usuarios/restablecer", vistas_red.restablecer_usuario),
+    path("usuarios/acceso", vistas_red.acceso),
+    path("red/suspension", vistas_red.suspension),
 
     # Saldo de EPS en Emida (solo Super Admin)
     path("proveedor/saldo", vistas_proveedor.saldo_emida),

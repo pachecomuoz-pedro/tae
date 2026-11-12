@@ -68,6 +68,10 @@ def manejar(fn):
             return error(e, status.HTTP_401_UNAUTHORIZED, clave="segundo_factor")
         except permisos.TopeDiarioExcedido as e:
             return error(e, status.HTTP_409_CONFLICT, clave="tope_diario")
+        except services.RedRetenida as e:
+            # Antes que SaldoInsuficiente: es una subclase y la pantalla
+            # tiene que decir algo distinto ("se libera con un fondeo").
+            return error(e, status.HTTP_402_PAYMENT_REQUIRED, clave="retencion")
         except services.SaldoInsuficiente as e:
             return error(e, status.HTTP_402_PAYMENT_REQUIRED, clave="saldo")
         except services.LimiteExcedido as e:
@@ -192,6 +196,9 @@ def _perfil(usuario):
             "ver_red": usuario.rol in ("super_admin", "administrador", "cliente"),
             "aprobar": usuario.rol in ("super_admin", "administrador", "cliente"),
             "restablecer": usuario.rol in ("super_admin", "administrador", "cliente"),
+            "retirar_a_eps": usuario.rol == "super_admin",
+            "suspender": usuario.rol in ("super_admin", "administrador", "cliente"),
+            "cambiar_acceso": usuario.rol in ("super_admin", "administrador", "cliente"),
         },
     }
 
@@ -299,13 +306,19 @@ def vender(request):
         producto=producto,
     )
 
+    respuesta = cierre.respuesta
     cuerpo = {
         "folio": reserva.operacion.folio,
         "invoice_no": reserva.operacion.invoice_no,
         "desenlace": cierre.desenlace,
         "monto": str(reserva.monto),
         "detalle": cierre.detalle,
-        "autorizacion": getattr(cierre.respuesta, "control_no", "") or "",
+        "autorizacion": getattr(respuesta, "control_no", "") or "",
+        # Lo que dijo el proveedor, para que el cajero sepa por qué y
+        # soporte tenga el código. `mensaje` es el texto del proveedor tal
+        # cual; `codigo` el responseCode (o el HTTP si fue un rechazo 4xx).
+        "mensaje": getattr(cierre, "mensaje", "") or "",
+        "codigo": getattr(cierre, "codigo", "") or "",
     }
     codigos = {
         "aprobada": status.HTTP_201_CREATED,
@@ -322,29 +335,46 @@ def vender(request):
 @permission_classes([Operativo])
 @manejar
 def mi_saldo(request):
-    """Saldo que le toca ver a quien pregunta: su bolsa, o la de su cliente y el límite de su caja."""
-    usuario = request.user
-    cliente = usuario.cliente or getattr(usuario.punto_venta, "cliente", None)
+    """
+    Lo que le toca ver a quien pregunta.
 
-    if cliente is not None:
+    - Caja: SU disponible para vender y, si no puede vender, por qué. No ve
+      la bolsa de su cliente: ni la necesita para vender ni le corresponde.
+    - Cliente y Administrador: Disponible (lo que pueden mover ellos) y
+      Saldo red (lo que queda por vender en toda su rama), más lo retenido
+      por correcciones de fondeo (decisión 27).
+    """
+    usuario = request.user
+
+    if usuario.punto_venta is not None:
+        pdv = usuario.punto_venta
+        limite = getattr(pdv, "limite", None)
+        estado = services.estado_de_venta(pdv)
+        return Response({
+            "titular": pdv.cliente.nombre,
+            "saldo": str(estado["disponible"]),
+            "disponible": str(estado["disponible"]),
+            "modo_bolsa": pdv.cliente.modo_bolsa,
+            "mi_caja": {
+                "nombre": pdv.nombre,
+                "limite": str(limite.limite) if limite else None,
+                "disponible": str(estado["disponible"]),
+            },
+            "venta": {"puede": estado["puede"], "motivo": estado["motivo"]},
+        })
+
+    if usuario.cliente is not None:
+        cliente = usuario.cliente
         bolsa = services.bolsa_de(cliente)
-        datos = {
+        return Response({
             "titular": cliente.nombre,
             "saldo": str(bolsa.saldo),
             "reservado": str(bolsa.reservado),
-            "disponible": str(bolsa.disponible),
             "limites_asignados": str(services.limites_de(cliente)),
             "retirable": str(services.disponible_para_retirar(cliente)),
             "modo_bolsa": cliente.modo_bolsa,
-        }
-        if usuario.punto_venta is not None:
-            limite = getattr(usuario.punto_venta, "limite", None)
-            datos["mi_caja"] = {
-                "nombre": usuario.punto_venta.nombre,
-                "limite": str(limite.limite) if limite else None,
-                "disponible": str(limite.disponible) if limite else None,
-            }
-        return Response(datos)
+            **services.resumen_saldos(cliente),
+        })
 
     if usuario.administrador is not None:
         bolsa = services.bolsa_de(usuario.administrador)
@@ -352,7 +382,7 @@ def mi_saldo(request):
             "titular": usuario.administrador.nombre,
             "saldo": str(bolsa.saldo),
             "reservado": str(bolsa.reservado),
-            "disponible": str(bolsa.disponible),
+            **services.resumen_saldos(usuario.administrador),
         })
 
     return Response({"titular": "Super Admin", "saldo": None})
@@ -405,6 +435,7 @@ def listar_clientes(request):
             "limites_asignados": str(services.limites_de(cliente)),
             "retirable": str(services.disponible_para_retirar(cliente)),
             "puntos_venta": PuntoVenta.objects.filter(cliente=cliente).count(),
+            **services.resumen_saldos(cliente),
         })
     return Response(sorted(salida, key=lambda c: c["nombre"]))
 

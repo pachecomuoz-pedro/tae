@@ -166,6 +166,9 @@ class TipoOperacion(models.TextChoices):
     DEVOLUCION = "DEV", "Devolución"
     VENTA = "VTA", "Venta"
     AJUSTE = "AJU", "Ajuste"
+    # El Super Admin regresa saldo de la red a la cuenta de fondeo de EPS:
+    # retiros directos y liquidaciones de una retención.
+    RETIRO = "RET", "Retiro a EPS"
 
 
 class Motivo(models.TextChoices):
@@ -180,6 +183,7 @@ class Motivo(models.TextChoices):
     SOLICITADA = "solicitada", "Devolución solicitada por el cliente"
     CONCILIACION = "conciliacion", "Ajuste por conciliación con el proveedor"
     SUSPENSION = "suspension", "Recuperación de saldo tras suspensión"
+    FONDEO_EXCEDENTE = "fondeo_excedente", "Fondeo de más (corrección)"
     OTRO = "otro", "Otro"
 
 
@@ -265,6 +269,10 @@ class Operacion(models.Model):
     )
     operacion_origen = models.ForeignKey(
         "self", null=True, blank=True, on_delete=models.PROTECT, related_name="correcciones"
+    )
+    # La retención que esta operación creó o liquidó, cuando aplica.
+    retencion = models.ForeignKey(
+        "Retencion", null=True, blank=True, on_delete=models.PROTECT, related_name="operaciones"
     )
 
     # Lo que viaja al proveedor. Vacío en todo lo que no sea una venta.
@@ -363,3 +371,81 @@ class Reserva(models.Model):
 
     def __str__(self):
         return f"Reserva {self.operacion.folio} {self.get_estado_display()}"
+
+
+class EstadoRetencion(models.TextChoices):
+    """Activa (frena la red), liquidada (ya se cobró completa) o cancelada (con motivo)."""
+    ACTIVA = "activa", "Activa"
+    LIQUIDADA = "liquidada", "Liquidada"
+    CANCELADA = "cancelada", "Cancelada"
+
+
+class Retencion(models.Model):
+    """
+    Dinero que una rama de la red le debe a EPS por un fondeo de más que ya
+    bajó por la cadena (decisión 27).
+
+    Ejemplo: se fondearon 110 a un administrador y debían ser 106. Si el
+    administrador ya repartió los 110, no hay de dónde retirar los 4 sin
+    elegir arbitrariamente a qué cliente o caja quitárselos. En lugar de
+    eso se crea una retención de 4 sobre el administrador:
+
+    - Cada venta de su red pasa solo si el saldo de red, después de la
+      venta, queda en `pendiente` o más. Al llegar ahí la rama deja de
+      vender: la red solo puede gastar lo que realmente debió recibir.
+    - El siguiente fondeo que reciba cubre primero `pendiente` (y un
+      traspaso, si la retención es de un cliente). Al llegar a cero queda
+      LIQUIDADA y la rama vuelve a vender normal.
+    - El Super Admin puede cancelarla con motivo.
+
+    La fila también sirve de candado: toda venta de una rama con retención
+    bloquea esta fila antes de leer el saldo de red. Eso pone en fila solo
+    las ventas de ramas retenidas; las demás no pagan nada.
+    """
+
+    uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    inquilino = models.ForeignKey(Inquilino, on_delete=models.PROTECT, related_name="+")
+    administrador = models.ForeignKey(
+        Administrador, null=True, blank=True, on_delete=models.PROTECT, related_name="retenciones"
+    )
+    cliente = models.ForeignKey(
+        Cliente, null=True, blank=True, on_delete=models.PROTECT, related_name="retenciones"
+    )
+    monto = models.DecimalField(max_digits=18, decimal_places=4)
+    pendiente = models.DecimalField(max_digits=18, decimal_places=4)
+    estado = models.CharField(
+        max_length=10, choices=EstadoRetencion.choices, default=EstadoRetencion.ACTIVA
+    )
+    motivo = models.CharField(max_length=20, choices=Motivo.choices)
+    nota = models.CharField(max_length=500, blank=True)
+    autorizado_por = models.CharField(max_length=160, blank=True)
+    operacion_origen = models.ForeignKey(
+        Operacion, null=True, blank=True, on_delete=models.PROTECT, related_name="+"
+    )
+    creado = models.DateTimeField(auto_now_add=True)
+    resuelto = models.DateTimeField(null=True, blank=True)
+    resuelto_por = models.CharField(max_length=160, blank=True)
+    nota_resolucion = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        db_table = "saldo_retencion"
+        constraints = [
+            models.CheckConstraint(
+                name="retencion_un_solo_titular",
+                condition=(
+                    Q(administrador__isnull=False, cliente__isnull=True)
+                    | Q(administrador__isnull=True, cliente__isnull=False)
+                ),
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["administrador", "estado"]),
+            models.Index(fields=["cliente", "estado"]),
+        ]
+
+    def __str__(self):
+        return f"Retención {self.titular.nombre} {self.pendiente}"
+
+    @property
+    def titular(self):
+        return self.administrador or self.cliente

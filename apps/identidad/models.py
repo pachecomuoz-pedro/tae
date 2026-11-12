@@ -281,6 +281,11 @@ class AccionAdministrativa(models.TextChoices):
     RESTABLECIMIENTO = "restablecimiento", "Restablecimiento de contraseña"
     CAMBIO_CONTRASENA = "cambio_contrasena", "Cambio de contraseña"
     REINICIO_TOTP = "reinicio_totp", "Reinicio de segundo factor"
+    DESACTIVACION = "desactivacion", "Desactivación de acceso"
+    REACTIVACION_ACCESO = "reactiva_acceso", "Reactivación de acceso"
+    RETIRO = "retiro", "Retiro de saldo a EPS"
+    RETENCION = "retencion", "Retención de red"
+    CANCELA_RETENCION = "cancela_retencion", "Cancelación de retención"
 
 
 class BitacoraAdministracion(models.Model):

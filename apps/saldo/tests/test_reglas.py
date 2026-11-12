@@ -145,8 +145,11 @@ class CicloDeVenta(TestCase):
 
         self.assertEqual(reserva.estado, EstadoReserva.ACTIVA)
         self.assertEqual(services.bolsa_de(cliente).reservado, D("100.0000"))
-        # Y ese dinero no se puede retirar.
-        self.assertEqual(services.disponible_para_retirar(cliente), D("440.0000"))
+        # Y ese dinero no se puede retirar. Los 100 en vuelo ya están dentro
+        # del límite de 500 de la caja (el límite es lo que le queda, con lo
+        # reservado incluido), así que se restan una sola vez: 1,040 − 500.
+        # Antes se restaban dos veces y el retirable salía de 440.
+        self.assertEqual(services.disponible_para_retirar(cliente), D("540.0000"))
 
     def test_la_caja_no_vende_mas_alla_de_su_limite(self):
         _, admin, cliente, pdv = escenario()

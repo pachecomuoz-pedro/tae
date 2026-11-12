@@ -17,9 +17,18 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q, Sum
 from django.utils import timezone
 
-from apps.core.models import Cliente, EstadoCliente, EstadoPuntoVenta, ModoBolsa, PuntoVenta
+from apps.core.models import (
+    Administrador,
+    Cliente,
+    EstadoAdministrador,
+    EstadoCliente,
+    EstadoPuntoVenta,
+    ModoBolsa,
+    PuntoVenta,
+)
 
 from .models import (
     Asiento,
@@ -28,9 +37,11 @@ from .models import (
     BolsaPuntoVenta,
     ClaveSistema,
     EstadoReserva,
+    EstadoRetencion,
     Motivo,
     Operacion,
     Reserva,
+    Retencion,
     Secuencia,
     TipoBolsa,
     TipoOperacion,
@@ -43,6 +54,11 @@ CERO = Decimal("0.0000")
 def q(valor):
     """Cuatro decimales, siempre. Redondeo comercial."""
     return Decimal(valor).quantize(CENTAVO, rounding=ROUND_HALF_UP)
+
+
+def pesos(valor):
+    """Para mensajes que lee una persona: $1,234.50. El ledger sigue en cuatro decimales."""
+    return f"${Decimal(valor).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):,}"
 
 
 # --------------------------------------------------------------------------
@@ -66,6 +82,14 @@ class MotivoRequerido(ErrorSaldo):
 
 class OperacionNoPermitida(ErrorSaldo):
     """La regla de negocio lo impide (409)."""
+
+
+class RedRetenida(SaldoInsuficiente):
+    """
+    La venta dejaría la red por debajo de lo retenido por una corrección de
+    fondeo (decisión 27). Es un caso de saldo insuficiente, pero con su
+    propia clave en la API para que la pantalla diga qué hacer.
+    """
 
 
 class PartidaDescuadrada(ErrorSaldo):
@@ -208,11 +232,19 @@ def _crear_operacion(inquilino, tipo, *, motivo="", nota="", autorizado_por="",
 # --------------------------------------------------------------------------
 @transaction.atomic
 def fondear_administrador(administrador, monto, *, autorizado_por=""):
-    """El Super Admin pone saldo en la bolsa de un administrador."""
+    """
+    El Super Admin pone saldo en la bolsa de un administrador.
+
+    Si el administrador tiene una retención activa, el fondeo la cubre
+    primero (decisión 27): el fondeo se asienta completo con su folio y la
+    liquidación sale aparte con el suyo, para que en la bitácora se vean
+    las dos cosas. La lista de liquidaciones queda en `operacion.liquidaciones`.
+    """
     monto = q(monto)
     if monto <= CERO:
         raise OperacionNoPermitida("El monto a fondear debe ser positivo")
 
+    retenciones = _bloquear_retenciones(administrador)
     inquilino = administrador.inquilino
     operacion = _crear_operacion(
         inquilino, TipoOperacion.COMPRA, autorizado_por=autorizado_por
@@ -224,9 +256,13 @@ def fondear_administrador(administrador, monto, *, autorizado_por=""):
             (bolsa_de(administrador), monto),
         ],
     )
+    operacion.liquidaciones = _liquidar(
+        administrador, retenciones, autorizado_por=autorizado_por
+    )
     return operacion
 
 
+@transaction.atomic
 def fondear_cliente(cliente, monto, *, autorizado_por=""):
     """
     El Super Admin pone saldo directo en la bolsa de un cliente.
@@ -241,6 +277,7 @@ def fondear_cliente(cliente, monto, *, autorizado_por=""):
     if monto <= CERO:
         raise OperacionNoPermitida("El monto a asignar debe ser positivo")
 
+    retenciones = _bloquear_retenciones(cliente)
     inquilino = cliente.inquilino
     operacion = _crear_operacion(
         inquilino, TipoOperacion.COMPRA, autorizado_por=autorizado_por
@@ -252,6 +289,7 @@ def fondear_cliente(cliente, monto, *, autorizado_por=""):
             (bolsa_de(cliente), monto),
         ],
     )
+    operacion.liquidaciones = _liquidar(cliente, retenciones, autorizado_por=autorizado_por)
     return operacion
 
 
@@ -279,13 +317,18 @@ def traspasar_a_cliente(administrador, cliente, monto_pagado, *, autorizado_por=
         raise OperacionNoPermitida("El monto a traspasar debe ser positivo")
     if cliente.administrador_id != administrador.pk:
         raise OperacionNoPermitida("El cliente no pertenece a ese administrador")
+    # Se releen de la base: una suspensión de hace un segundo tiene que
+    # contar aunque quien llama traiga los objetos de antes.
+    cliente = Cliente.objects.select_related("administrador").get(pk=cliente.pk)
     if not cliente.puede_operar:
-        raise OperacionNoPermitida(
-            f"{cliente.nombre} está {cliente.get_estado_display().lower()}: no puede recibir saldo"
-        )
+        raise OperacionNoPermitida(f"{cliente.motivo_no_opera}: no puede recibir saldo")
 
+    retenciones = _bloquear_retenciones(cliente)
     inquilino = administrador.inquilino
     bolsa_admin = bolsa_de(administrador)
+    bolsa_cliente = bolsa_de(cliente)
+    bloqueadas = _bloquear([bolsa_admin, bolsa_cliente])
+    bolsa_admin = bloqueadas[bolsa_admin.pk]
     if q(bolsa_admin.disponible) < pagado:
         raise SaldoInsuficiente(
             f"La bolsa del administrador tiene {bolsa_admin.disponible} y se piden {pagado}"
@@ -294,12 +337,16 @@ def traspasar_a_cliente(administrador, cliente, monto_pagado, *, autorizado_por=
     operacion = _crear_operacion(
         inquilino, TipoOperacion.TRASPASO, autorizado_por=autorizado_por
     )
-    movimientos = [(bolsa_admin, -pagado), (bolsa_de(cliente), acreditado)]
+    movimientos = [(bolsa_admin, -pagado), (bolsa_cliente, acreditado)]
     if bonificacion != CERO:
         movimientos.append(
             (bolsa_sistema(inquilino, ClaveSistema.BONIFICACION_MARGEN), -bonificacion)
         )
     _asentar(operacion, movimientos)
+    # Una retención del cliente (un fondeo directo de más que ya bajó a sus
+    # cajas) se cubre con lo primero que le llegue, venga de EPS o de su
+    # administrador: es lo que vuelve a dejar vender a su red.
+    operacion.liquidaciones = _liquidar(cliente, retenciones, autorizado_por=autorizado_por)
     return operacion
 
 
@@ -314,15 +361,25 @@ def limites_de(cliente, excluyendo=None):
     return q(sum((f.limite for f in filas), CERO))
 
 
-def disponible_para_retirar(cliente):
+def disponible_para_retirar(cliente, bolsa=None):
     """
     Lo que de verdad se puede sacar de la bolsa de un cliente.
 
     No es su saldo: hay dinero comprometido en los límites de sus cajas y en
     las ventas que todavía no cierran.
+
+    Una venta en vuelo de una caja con límite ya está dentro de ese límite
+    (el límite es lo que le queda por gastar, reservado incluido). Por eso
+    solo se resta aparte lo reservado por ventas de cajas SIN límite, que
+    son las de bolsa compartida. Restarlo dos veces daba un retirable
+    negativo mientras una venta estaba en vuelo.
     """
-    bolsa = bolsa_de(cliente)
-    return q(bolsa.saldo - limites_de(cliente) - bolsa.reservado)
+    bolsa = bolsa or bolsa_de(cliente)
+    reservado_en_limites = BolsaPuntoVenta.objects.filter(
+        punto_venta__cliente=cliente
+    ).aggregate(t=Sum("reservado"))["t"] or CERO
+    libre = bolsa.saldo - limites_de(cliente) - (bolsa.reservado - reservado_en_limites)
+    return q(max(libre, CERO))
 
 
 @transaction.atomic
@@ -476,6 +533,331 @@ def ajustar(cliente, monto, *, motivo, nota="", autorizado_por="", a_favor=False
 
 
 # --------------------------------------------------------------------------
+# Saldo de red, retiros a EPS y retenciones (decisión 27)
+# --------------------------------------------------------------------------
+def _clientes_de(administrador):
+    return Cliente.objects.filter(administrador=administrador)
+
+
+def saldo_red(entidad):
+    """
+    Todo lo que queda por vender en la rama de esa entidad.
+
+    - Cliente: su bolsa completa (lo asignado a sus cajas vive ahí).
+    - Administrador: su bolsa más las bolsas de todos sus clientes.
+
+    Los traspasos internos no lo cambian; solo las ventas, los fondeos y
+    los retiros a EPS.
+    """
+    if isinstance(entidad, Cliente):
+        return q(bolsa_de(entidad).saldo)
+    suma = Bolsa.objects.filter(cliente__administrador=entidad).aggregate(
+        t=Sum("saldo"))["t"] or CERO
+    return q(bolsa_de(entidad).saldo + suma)
+
+
+def vendible_red(entidad):
+    """Saldo de red menos lo apartado por ventas en vuelo."""
+    if isinstance(entidad, Cliente):
+        bolsa = bolsa_de(entidad)
+        return q(bolsa.saldo - bolsa.reservado)
+    fila = Bolsa.objects.filter(cliente__administrador=entidad).aggregate(
+        s=Sum("saldo"), r=Sum("reservado"))
+    propia = bolsa_de(entidad)
+    return q(propia.saldo - propia.reservado + (fila["s"] or CERO) - (fila["r"] or CERO))
+
+
+def _filtro_titular(entidad):
+    if isinstance(entidad, Administrador):
+        return Q(administrador=entidad)
+    if isinstance(entidad, Cliente):
+        return Q(cliente=entidad)
+    raise OperacionNoPermitida(f"{entidad!r} no puede tener retenciones")
+
+
+def retenido(entidad):
+    """Lo que falta por liquidar de las retenciones activas de esa entidad."""
+    total = Retencion.objects.filter(
+        _filtro_titular(entidad), estado=EstadoRetencion.ACTIVA
+    ).aggregate(t=Sum("pendiente"))["t"] or CERO
+    return q(total)
+
+
+def disponible_de(entidad):
+    """
+    Lo que esa entidad puede mover hoy sin tocar a nadie más.
+
+    - Administrador: su bolsa propia (lo que puede traspasar).
+    - Cliente: lo que no está asignado a cajas ni apartado en ventas.
+    """
+    if isinstance(entidad, Administrador):
+        return q(bolsa_de(entidad).disponible)
+    return disponible_para_retirar(entidad)
+
+
+def resumen_saldos(entidad):
+    """Los números que ven el Administrador y el Cliente: Disponible y Saldo red."""
+    return {
+        "disponible": str(disponible_de(entidad)),
+        "saldo_red": str(saldo_red(entidad)),
+        "retenido": str(retenido(entidad)),
+    }
+
+
+def _bloquear_retenciones(*entidades):
+    """
+    Bloquea las retenciones activas de esas entidades, en orden de pk.
+
+    Va SIEMPRE antes de bloquear bolsas. Venta, fondeo y traspaso toman los
+    candados en el mismo orden (retenciones, luego bolsas) y así no se
+    abrazan entre sí.
+    """
+    filtro = Q(pk__in=[])
+    for e in entidades:
+        if e is not None:
+            filtro |= _filtro_titular(e)
+    return list(
+        Retencion.objects.select_for_update()
+        .filter(filtro, estado=EstadoRetencion.ACTIVA)
+        .order_by("pk")
+    )
+
+
+def _bolsa_bloqueada_y_fondeo(titular):
+    """La bolsa del titular y la cuenta de fondeo, bloqueadas en orden de pk."""
+    propia = bolsa_de(titular)
+    fondeo = bolsa_sistema(titular.inquilino, ClaveSistema.FONDEO)
+    bloqueadas = _bloquear([propia, fondeo])
+    return bloqueadas[propia.pk], bloqueadas[fondeo.pk]
+
+
+def _retirable_bloqueado(titular, bolsa):
+    if isinstance(titular, Administrador):
+        return q(max(bolsa.saldo - bolsa.reservado, CERO))
+    return disponible_para_retirar(titular, bolsa=bolsa)
+
+
+def _asentar_retiro(titular, bolsa, fondeo, monto, *, motivo, nota, autorizado_por,
+                    operacion_origen=None, retencion=None):
+    operacion = _crear_operacion(
+        titular.inquilino, TipoOperacion.RETIRO, motivo=motivo, nota=nota,
+        autorizado_por=autorizado_por, operacion_origen=operacion_origen,
+    )
+    if retencion is not None:
+        operacion.retencion = retencion
+        operacion.save(update_fields=["retencion"])
+    _asentar(operacion, [(bolsa, -monto), (fondeo, monto)])
+    return operacion
+
+
+@transaction.atomic
+def retirar_a_eps(titular, monto, *, motivo, nota="", autorizado_por="",
+                  operacion_origen=None):
+    """
+    El Super Admin regresa saldo de un administrador o de un cliente a la
+    cuenta de fondeo de EPS. Es el inverso exacto de un fondeo.
+
+    Solo se toma lo disponible: nunca lo apartado por ventas en vuelo, y en
+    un cliente tampoco lo asignado a sus cajas (para eso primero se baja el
+    límite de la caja). Si hace falta más, ver `corregir_fondeo`.
+    """
+    monto = q(monto)
+    if monto <= CERO:
+        raise OperacionNoPermitida("El monto a retirar debe ser positivo")
+    if not motivo:
+        raise MotivoRequerido("Todo retiro lleva motivo")
+
+    bolsa, fondeo = _bolsa_bloqueada_y_fondeo(titular)
+    disponible = _retirable_bloqueado(titular, bolsa)
+    if monto > disponible:
+        raise SaldoInsuficiente(
+            f"{titular.nombre} tiene {pesos(disponible)} disponible para retirar y se piden {pesos(monto)}"
+        )
+    return _asentar_retiro(
+        titular, bolsa, fondeo, monto, motivo=motivo, nota=nota,
+        autorizado_por=autorizado_por, operacion_origen=operacion_origen,
+    )
+
+
+@transaction.atomic
+def corregir_fondeo(titular, monto, *, motivo=Motivo.FONDEO_EXCEDENTE, nota="",
+                    autorizado_por="", operacion_origen=None):
+    """
+    Corrige un fondeo de más, aunque el dinero ya haya bajado por la cadena.
+
+    1. Se retira directo lo que el titular tenga disponible.
+    2. El faltante se convierte en una retención sobre su rama: la red
+       sigue vendiendo hasta llegar a ese monto y ahí se detiene, hasta que
+       un fondeo la cubra (decisión 27).
+
+    Devuelve (retirado, operacion_o_None, retencion_o_None).
+    """
+    monto = q(monto)
+    if monto <= CERO:
+        raise OperacionNoPermitida("El monto a corregir debe ser positivo")
+    if not motivo:
+        raise MotivoRequerido("Toda corrección lleva motivo")
+    if motivo == Motivo.OTRO and not nota.strip():
+        raise MotivoRequerido("El motivo 'Otro' exige una nota")
+
+    bolsa, fondeo = _bolsa_bloqueada_y_fondeo(titular)
+    directo = min(_retirable_bloqueado(titular, bolsa), monto)
+    faltante = q(monto - directo)
+
+    retencion = None
+    if faltante > CERO:
+        retencion = Retencion.objects.create(
+            inquilino=titular.inquilino,
+            administrador=titular if isinstance(titular, Administrador) else None,
+            cliente=titular if isinstance(titular, Cliente) else None,
+            monto=faltante,
+            pendiente=faltante,
+            motivo=motivo,
+            nota=nota,
+            autorizado_por=autorizado_por,
+            operacion_origen=operacion_origen,
+        )
+
+    operacion = None
+    if directo > CERO:
+        operacion = _asentar_retiro(
+            titular, bolsa, fondeo, directo, motivo=motivo, nota=nota,
+            autorizado_por=autorizado_por, operacion_origen=operacion_origen,
+            retencion=retencion,
+        )
+    return directo, operacion, retencion
+
+
+def _liquidar(titular, retenciones, *, autorizado_por=""):
+    """
+    Cobra las retenciones ya bloqueadas con lo que el titular tenga
+    disponible después de recibir dinero. Una operación por retención, para
+    que cada liquidación tenga su folio y apunte a la retención que cubre.
+    """
+    if not retenciones:
+        return []
+    bolsa, fondeo = _bolsa_bloqueada_y_fondeo(titular)
+    hechas = []
+    for retencion in retenciones:
+        disponible = _retirable_bloqueado(titular, bolsa)
+        aplica = q(min(retencion.pendiente, disponible))
+        if aplica <= CERO:
+            break
+        hechas.append(_asentar_retiro(
+            titular, bolsa, fondeo, aplica,
+            motivo=retencion.motivo,
+            nota="Liquidación de retención por corrección de fondeo",
+            autorizado_por=autorizado_por or "sistema",
+            operacion_origen=retencion.operacion_origen,
+            retencion=retencion,
+        ))
+        bolsa.refresh_from_db()
+        retencion.pendiente = q(retencion.pendiente - aplica)
+        campos = ["pendiente"]
+        if retencion.pendiente <= CERO:
+            retencion.estado = EstadoRetencion.LIQUIDADA
+            retencion.resuelto = timezone.now()
+            retencion.resuelto_por = autorizado_por or "sistema"
+            campos += ["estado", "resuelto", "resuelto_por"]
+        retencion.save(update_fields=campos)
+    return hechas
+
+
+@transaction.atomic
+def cancelar_retencion(retencion, *, nota, autorizado_por=""):
+    """
+    El Super Admin la da por perdonada: la rama vuelve a vender todo su
+    saldo. No mueve dinero; lo ya liquidado se queda liquidado.
+    """
+    if not (nota or "").strip():
+        raise MotivoRequerido("Cancelar una retención exige una nota")
+    retencion = Retencion.objects.select_for_update().get(pk=retencion.pk)
+    if retencion.estado != EstadoRetencion.ACTIVA:
+        raise OperacionNoPermitida(
+            f"La retención ya está {retencion.get_estado_display().lower()}"
+        )
+    retencion.estado = EstadoRetencion.CANCELADA
+    retencion.resuelto = timezone.now()
+    retencion.resuelto_por = autorizado_por
+    retencion.nota_resolucion = nota[:500]
+    retencion.save(update_fields=["estado", "resuelto", "resuelto_por", "nota_resolucion"])
+    return retencion
+
+
+def _verificar_retenciones(punto_venta, retenciones, monto):
+    """
+    Con las retenciones de la rama ya bloqueadas, revisa que la venta deje
+    a cada titular retenido con al menos lo retenido en su red.
+    """
+    cliente = punto_venta.cliente
+    por_titular = {}
+    for r in retenciones:
+        titular = cliente.administrador if r.administrador_id else cliente
+        clave = ("a", titular.pk) if r.administrador_id else ("c", titular.pk)
+        actual = por_titular.get(clave, (titular, CERO))
+        por_titular[clave] = (titular, q(actual[1] + r.pendiente))
+
+    for titular, pendiente in por_titular.values():
+        vendible = vendible_red(titular)
+        if q(vendible - monto) < pendiente:
+            quien = "tu administrador" if isinstance(titular, Administrador) else "tu cliente"
+            raise RedRetenida(
+                f"La red de {titular.nombre} tiene {pesos(pendiente)} retenidos por una "
+                f"corrección de fondeo y solo puede vender "
+                f"{pesos(max(vendible - pendiente, CERO))}. "
+                f"Se libera cuando {quien} reciba fondeo."
+            )
+
+
+def estado_de_venta(punto_venta):
+    """
+    Si esta caja puede vender ahora y cuánto, con el motivo en palabras del
+    cajero cuando no. Es lo que la pantalla muestra ANTES de vender, para
+    no dejar capturar una venta que el servidor va a rechazar.
+
+    Devuelve {"puede": bool, "motivo": str, "disponible": Decimal|None}.
+    """
+    pdv = PuntoVenta.objects.select_related("cliente__administrador").get(pk=punto_venta.pk)
+    cliente = pdv.cliente
+    admin = cliente.administrador
+
+    def no(motivo):
+        return {"puede": False, "motivo": motivo, "disponible": CERO}
+
+    if pdv.estado != EstadoPuntoVenta.ACTIVO or not pdv.activo:
+        return no(f"Esta caja está {pdv.get_estado_display().lower()}. Habla con tu cliente.")
+    if not admin.puede_operar:
+        return no("La red de tu administrador está suspendida. Habla con tu cliente.")
+    if not cliente.puede_operar:
+        return no(f"{cliente.nombre} está {cliente.get_estado_display().lower()}.")
+
+    bolsa = bolsa_de(cliente)
+    disponible = q(bolsa.saldo - bolsa.reservado)
+    if cliente.modo_bolsa == ModoBolsa.ASIGNADA:
+        fila = BolsaPuntoVenta.objects.filter(punto_venta=pdv).first()
+        if fila is None or fila.limite <= CERO:
+            return no(
+                "Esta caja no tiene saldo asignado. Pide a tu cliente que le asigne "
+                "un límite antes de vender."
+            )
+        disponible = min(disponible, q(fila.limite - fila.reservado))
+
+    for titular in (admin, cliente):
+        pendiente = retenido(titular)
+        if pendiente > CERO:
+            disponible = min(disponible, q(vendible_red(titular) - pendiente))
+
+    if disponible <= CERO:
+        if retenido(admin) > CERO or retenido(cliente) > CERO:
+            return no(
+                "Hay saldo retenido por una corrección de fondeo y la red ya llegó "
+                "a ese monto. Se libera cuando reciba fondeo."
+            )
+        return no("No hay saldo para vender. Pide saldo a tu cliente.")
+    return {"puede": True, "motivo": "", "disponible": q(disponible)}
+
+
+# --------------------------------------------------------------------------
 # El ciclo de la venta
 # --------------------------------------------------------------------------
 @transaction.atomic
@@ -492,14 +874,22 @@ def reservar(punto_venta, monto, *, producto=None):
     if monto <= CERO:
         raise OperacionNoPermitida("El monto de la venta debe ser positivo")
 
-    punto_venta = PuntoVenta.objects.select_related("cliente").get(pk=punto_venta.pk)
+    punto_venta = PuntoVenta.objects.select_related("cliente__administrador").get(
+        pk=punto_venta.pk
+    )
     if not punto_venta.puede_vender:
         raise OperacionNoPermitida(
             f"{punto_venta.nombre} no puede vender en este momento"
         )
 
     cliente = punto_venta.cliente
+    # Candados en el orden de siempre: primero las retenciones de la rama
+    # (si las hay), luego la bolsa. Sin retenciones esta consulta no bloquea
+    # nada y la venta sigue igual que antes.
+    retenciones = _bloquear_retenciones(cliente.administrador, cliente)
     bolsa = Bolsa.objects.select_for_update().get(pk=bolsa_de(cliente).pk)
+    if retenciones:
+        _verificar_retenciones(punto_venta, retenciones, monto)
     if q(bolsa.saldo - bolsa.reservado) < monto:
         raise SaldoInsuficiente(
             f"La bolsa de {cliente.nombre} tiene {q(bolsa.saldo - bolsa.reservado)} "
@@ -668,6 +1058,68 @@ def reactivar_cliente(cliente, *, autorizado_por=""):
         pdv.estado_previo = ""
         pdv.save(update_fields=["estado", "estado_previo"])
     return cliente
+
+
+@transaction.atomic
+def suspender_administrador(administrador, *, autorizado_por=""):
+    """
+    Detiene a toda la red del administrador: no traspasa, sus clientes no
+    reciben saldo y ninguna de sus cajas vende.
+
+    No reescribe el estado de cada cliente ni de cada caja: la cascada se
+    deriva en Cliente.puede_operar. Así, al reactivar, cada quien queda
+    como estaba, incluido un cliente que ya estaba suspendido a mano.
+    """
+    administrador = Administrador.objects.select_for_update().get(pk=administrador.pk)
+    administrador.estado = EstadoAdministrador.SUSPENDIDO
+    administrador.save(update_fields=["estado"])
+    return administrador
+
+
+@transaction.atomic
+def reactivar_administrador(administrador, *, autorizado_por=""):
+    """Levanta la suspensión. Ver suspender_administrador."""
+    administrador = Administrador.objects.select_for_update().get(pk=administrador.pk)
+    administrador.estado = EstadoAdministrador.ACTIVO
+    administrador.save(update_fields=["estado"])
+    return administrador
+
+
+@transaction.atomic
+def suspender_punto_venta(punto_venta, *, autorizado_por=""):
+    """
+    Suspende una sola caja. `estado_previo` queda vacío a propósito: es la
+    marca de "suspendida a mano", y por eso reactivar al cliente no la revive.
+    """
+    pdv = PuntoVenta.objects.select_for_update().get(pk=punto_venta.pk)
+    if pdv.estado != EstadoPuntoVenta.ACTIVO:
+        raise OperacionNoPermitida(
+            f"{pdv.nombre} está {pdv.get_estado_display().lower()}: solo se suspende una caja activa"
+        )
+    pdv.estado = EstadoPuntoVenta.SUSPENDIDO
+    pdv.estado_previo = ""
+    pdv.save(update_fields=["estado", "estado_previo"])
+    return pdv
+
+
+@transaction.atomic
+def reactivar_punto_venta(punto_venta, *, autorizado_por=""):
+    """
+    Reactiva una caja suspendida a mano. Si la suspendió la cascada de su
+    cliente, se reactiva reactivando al cliente: si no, al reactivar al
+    cliente esta caja quedaría en un estado que nadie eligió.
+    """
+    pdv = PuntoVenta.objects.select_for_update().select_related("cliente").get(pk=punto_venta.pk)
+    if pdv.estado != EstadoPuntoVenta.SUSPENDIDO:
+        raise OperacionNoPermitida(f"{pdv.nombre} no está suspendida")
+    if pdv.cliente.estado == EstadoCliente.SUSPENDIDO:
+        raise OperacionNoPermitida(
+            f"{pdv.cliente.nombre} está suspendido: reactiva primero al cliente"
+        )
+    pdv.estado = EstadoPuntoVenta.ACTIVO
+    pdv.estado_previo = ""
+    pdv.save(update_fields=["estado", "estado_previo"])
+    return pdv
 
 
 # --------------------------------------------------------------------------

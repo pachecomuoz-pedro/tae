@@ -17,7 +17,7 @@ from django.conf import settings
 from django.db.models import Sum
 from django.utils import timezone
 
-from apps.core.models import EstadoCliente, EstadoPuntoVenta, ModoBolsa
+from apps.core.models import EstadoPuntoVenta, ModoBolsa
 from apps.saldo.models import Asiento, TipoOperacion
 
 from .models import Rol
@@ -116,7 +116,7 @@ def puede_fondear_cliente(usuario, cliente):
     if not usuario.alcanza_cliente(cliente):
         raise PermisoDenegado("Ese cliente es de otro inquilino")
     if not cliente.puede_operar:
-        raise PermisoDenegado(f"{cliente.nombre} no está aprobado o está suspendido")
+        raise PermisoDenegado(cliente.motivo_no_opera)
 
 
 def traspasado_hoy(administrador):
@@ -143,10 +143,8 @@ def puede_traspasar(usuario, cliente, monto, *, totp_verificado=False):
         raise PermisoDenegado("Ese rol no traspasa saldo a clientes")
     if not usuario.alcanza_cliente(cliente):
         raise PermisoDenegado(f"{cliente.nombre} no está bajo tu alcance")
-    if cliente.estado != EstadoCliente.APROBADO:
-        raise PermisoDenegado(
-            f"{cliente.nombre} está {cliente.get_estado_display().lower()}"
-        )
+    if not cliente.puede_operar:
+        raise PermisoDenegado(cliente.motivo_no_opera)
 
     monto = _d(monto)
     administrador = cliente.administrador
@@ -196,6 +194,56 @@ def puede_suspender_cliente(usuario, cliente):
         raise PermisoDenegado(f"{cliente.nombre} no está bajo tu alcance")
 
 
+def puede_retirar_a_eps(usuario, titular):
+    """
+    Regresar saldo a la cuenta de fondeo de EPS, y corregir un fondeo de
+    más con retención (decisión 27). Es el inverso del fondeo, y por eso
+    solo lo hace quien fondea: el Super Admin.
+    """
+    if usuario.rol != Rol.SUPER_ADMIN:
+        raise PermisoDenegado("Solo el Super Admin retira saldo hacia EPS")
+    if titular.inquilino_id != usuario.inquilino_id:
+        raise PermisoDenegado(f"{titular.nombre} es de otro inquilino")
+
+
+def puede_cancelar_retencion(usuario, retencion):
+    """Perdonar una retención es una decisión de dinero de EPS: solo el Super Admin."""
+    if usuario.rol != Rol.SUPER_ADMIN:
+        raise PermisoDenegado("Solo el Super Admin cancela una retención")
+    if retencion.inquilino_id != usuario.inquilino_id:
+        raise PermisoDenegado("Esa retención es de otro inquilino")
+
+
+def puede_suspender_administrador(usuario, administrador):
+    """Solo el Super Admin suspende o reactiva a un administrador."""
+    if usuario.rol != Rol.SUPER_ADMIN:
+        raise PermisoDenegado("Solo el Super Admin suspende administradores")
+    if not usuario.alcanza_administrador(administrador):
+        raise PermisoDenegado("Ese administrador es de otro inquilino")
+
+
+def puede_suspender_punto_venta(usuario, punto_venta):
+    """Su cliente, su administrador o el Super Admin. Una caja no se suspende a sí misma."""
+    if usuario.rol == Rol.PUNTO_VENTA:
+        raise PermisoDenegado("Una caja no suspende cajas")
+    if not usuario.alcanza_punto_venta(punto_venta):
+        raise PermisoDenegado(f"{punto_venta.nombre} no está bajo tu alcance")
+
+
+def puede_cambiar_acceso(usuario, objetivo):
+    """
+    Desactivar o reactivar el acceso de una persona sigue el mismo camino
+    que restablecer su contraseña: cada nivel sobre los de abajo, nadie
+    sobre sí mismo (un Super Admin que se desactiva se queda fuera).
+    """
+    if objetivo.pk == usuario.pk:
+        raise PermisoDenegado("No puedes desactivar tu propio acceso")
+    try:
+        puede_restablecer_contrasena(usuario, objetivo)
+    except PermisoDenegado as e:
+        raise PermisoDenegado(str(e).replace("restablece", "administra")) from e
+
+
 # --------------------------------------------------------------------------
 # Venta
 # --------------------------------------------------------------------------
@@ -225,10 +273,7 @@ def puede_vender(usuario, punto_venta):
             f"{punto_venta.nombre} está {punto_venta.get_estado_display().lower()}"
         )
     if not punto_venta.cliente.puede_operar:
-        raise PermisoDenegado(
-            f"{punto_venta.cliente.nombre} está "
-            f"{punto_venta.cliente.get_estado_display().lower()}"
-        )
+        raise PermisoDenegado(punto_venta.cliente.motivo_no_opera)
 
 
 # --------------------------------------------------------------------------

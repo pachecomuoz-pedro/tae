@@ -366,6 +366,113 @@ def reactivar_cliente(usuario, cliente):
     return resultado
 
 
+# --------------------------------------------------------------------------
+# Retiros a EPS y retenciones (decisión 27)
+# --------------------------------------------------------------------------
+@transaction.atomic
+def retirar_a_eps(usuario, titular, monto, *, motivo, nota="", retener_faltante=False,
+                  operacion_origen=None):
+    """
+    El Super Admin regresa saldo de un administrador o un cliente a EPS.
+
+    Sin `retener_faltante`, solo retira lo disponible y si no alcanza dice
+    que no. Con `retener_faltante` es una corrección de fondeo: retira lo
+    que haya y el resto queda como retención sobre la rama.
+
+    Devuelve (retirado, operacion_o_None, retencion_o_None).
+    """
+    permisos.puede_retirar_a_eps(usuario, titular)
+    if retener_faltante:
+        retirado, operacion, retencion = services.corregir_fondeo(
+            titular, monto, motivo=motivo, nota=nota, autorizado_por=usuario.nombre,
+            operacion_origen=operacion_origen,
+        )
+    else:
+        operacion = services.retirar_a_eps(
+            titular, monto, motivo=motivo, nota=nota, autorizado_por=usuario.nombre,
+            operacion_origen=operacion_origen,
+        )
+        retirado, retencion = services.q(monto), None
+
+    if operacion is not None:
+        registrar(usuario, AccionAdministrativa.RETIRO, titular,
+                  detalle=f"{operacion.folio} por {retirado}")
+    if retencion is not None:
+        registrar(usuario, AccionAdministrativa.RETENCION, titular,
+                  detalle=f"{retencion.pendiente} retenidos en su red")
+    return retirado, operacion, retencion
+
+
+@transaction.atomic
+def cancelar_retencion(usuario, retencion, *, nota):
+    """El Super Admin perdona lo que falta de una retención, con nota."""
+    permisos.puede_cancelar_retencion(usuario, retencion)
+    resultado = services.cancelar_retencion(retencion, nota=nota, autorizado_por=usuario.nombre)
+    registrar(usuario, AccionAdministrativa.CANCELA_RETENCION, retencion.titular,
+              detalle=f"{resultado.pendiente} perdonados: {nota}")
+    return resultado
+
+
+# --------------------------------------------------------------------------
+# Suspensión en todos los niveles y acceso de las personas
+# --------------------------------------------------------------------------
+@transaction.atomic
+def suspender_administrador(usuario, administrador):
+    """Detiene toda la red del administrador. Ver services.suspender_administrador."""
+    permisos.puede_suspender_administrador(usuario, administrador)
+    resultado = services.suspender_administrador(administrador, autorizado_por=usuario.nombre)
+    registrar(usuario, AccionAdministrativa.SUSPENSION, administrador)
+    return resultado
+
+
+@transaction.atomic
+def reactivar_administrador(usuario, administrador):
+    """Levanta la suspensión de un administrador y con ella la de su red."""
+    permisos.puede_suspender_administrador(usuario, administrador)
+    resultado = services.reactivar_administrador(administrador, autorizado_por=usuario.nombre)
+    registrar(usuario, AccionAdministrativa.REACTIVACION, administrador)
+    return resultado
+
+
+@transaction.atomic
+def suspender_punto_venta(usuario, punto_venta):
+    """Suspende una sola caja."""
+    permisos.puede_suspender_punto_venta(usuario, punto_venta)
+    resultado = services.suspender_punto_venta(punto_venta, autorizado_por=usuario.nombre)
+    registrar(usuario, AccionAdministrativa.SUSPENSION, punto_venta)
+    return resultado
+
+
+@transaction.atomic
+def reactivar_punto_venta(usuario, punto_venta):
+    """Reactiva una caja suspendida a mano."""
+    permisos.puede_suspender_punto_venta(usuario, punto_venta)
+    resultado = services.reactivar_punto_venta(punto_venta, autorizado_por=usuario.nombre)
+    registrar(usuario, AccionAdministrativa.REACTIVACION, punto_venta)
+    return resultado
+
+
+@transaction.atomic
+def cambiar_acceso(usuario, objetivo, *, activo):
+    """
+    Desactiva o reactiva el acceso de UNA persona sin tocar su entidad: un
+    cajero que se fue deja de entrar, y la caja sigue vendiendo con los
+    demás cajeros.
+
+    Desactivar cierra sus sesiones abiertas: Django deja de reconocer la
+    sesión de un usuario inactivo en la siguiente petición.
+    """
+    permisos.puede_cambiar_acceso(usuario, objetivo)
+    objetivo.is_active = bool(activo)
+    objetivo.save(update_fields=["is_active"])
+    registrar(
+        usuario,
+        AccionAdministrativa.REACTIVACION_ACCESO if activo else AccionAdministrativa.DESACTIVACION,
+        objetivo,
+    )
+    return objetivo
+
+
 def vender(usuario, punto_venta, producto, monto=None):
     """
     Reserva el monto de una venta. Quien la captura o libera es la capa de
@@ -454,7 +561,7 @@ def autenticar(correo, password, *, codigo_totp=None, origen=None):
     incorrecta: decir cuál de los dos falló le confirma a quien prueba
     correos cuáles existen.
     """
-    usuario = Usuario.objects.filter(correo__iexact=correo, is_active=True).first()
+    usuario = Usuario.objects.filter(correo__iexact=correo).first()
 
     def rechazar(motivo):
         BitacoraAcceso.objects.create(
@@ -471,6 +578,18 @@ def autenticar(correo, password, *, codigo_totp=None, origen=None):
 
     if not usuario.check_password(password):
         rechazar("contraseña incorrecta")
+
+    # Igual que con una cuenta pendiente: quien llegó aquí conoce la
+    # contraseña, así que se le dice el motivo real en lugar de hacerlo
+    # dudar de lo que tecleó.
+    if not usuario.is_active:
+        BitacoraAcceso.objects.create(
+            usuario=usuario, correo_intentado=correo, exito=False,
+            motivo="acceso desactivado", origen=origen,
+        )
+        raise permisos.PermisoDenegado(
+            "Tu acceso está desactivado. Habla con quien te dio de alta."
+        )
 
     # Una cuenta cuya entidad está pendiente o rechazada no entra, aunque la
     # contraseña sea correcta. Se dice el motivo real porque quien llegó

@@ -89,3 +89,47 @@ Ahora hay 234 y todas pasan.
 - **`deploy/nginx-tae.conf`**: el Nginx del servidor solo pone HTTPS y reenvía a `web`.
 - **`DESPLIEGUE.md`**: sin Node.js ni copia manual del build; React se compila en su contenedor.
 - **`.env.example`**: `DJANGO_ALLOWED_HOSTS` incluye `api`, porque el proxy de Vite llama a Django con ese nombre.
+
+
+---
+
+## Sexta entrega: correcciones de saldo, suspensión y pantalla de venta
+
+Viene de las pruebas del 10 de noviembre. Decisiones 26 y 27.
+
+### Saldo
+- **El Super Admin retira saldo hacia EPS** de administradores y clientes (`retiros/eps`, folio `RET-`, motivo obligatorio, bitácora).
+- **Retención de red** para fondeos de más que ya bajaron por la cadena: se retira lo disponible y el faltante se retiene. La rama vende hasta dejar lo retenido; el siguiente abono lo liquida con su propio folio. El Super Admin puede cancelarla con nota (`retenciones`, `retenciones/cancelar`).
+- **Disponible y Saldo red** en `saldo`, `clientes` y `red`, con lo retenido.
+- **Pantalla "Abonos y retiros"** del Super Admin (`web/src/SaldoRed.tsx`). Sustituye a Traspaso y Retiro en su menú: el traspaso descontaba de la bolsa del administrador, por eso el Super Admin no podía abonarle a un cliente desde ahí.
+
+### Suspensión y acceso
+- **Suspender o reactivar** administradores (detiene toda su red), clientes y cajas individuales (`red/suspension`).
+- **Desactivar o reactivar el acceso** de una persona sin tocar su entidad (`usuarios/acceso`). Al entrar se le dice que su acceso está desactivado.
+
+### Pantalla de venta
+- El encabezado de la caja muestra **su** disponible, no la bolsa del cliente; `saldo` ya no le manda a la caja los números de su cliente.
+- Si la caja no puede vender, **se avisa antes de capturar** y el botón queda deshabilitado; también si el producto cuesta más de lo disponible.
+- Productos **agrupados por compañía**, con el nombre completo.
+- En un rechazo se muestra el **motivo y el código del proveedor** (`venta` devuelve `mensaje` y `codigo`).
+- Al dar de alta una caja en bolsa asignada sin límite, se advierte que no podrá vender.
+
+### Diagnóstico y catálogo
+- **`manage.py ver_venta FOLIO`**: lo que se envió y lo que contestó el proveedor.
+- Los rechazos 4xx ahora guardan el cuerpo de la respuesta, y el `message` del sobre de Emida ya no se pierde cuando `data` viene vacío.
+- **`manage.py reasignar_carriers`**: mueve a su compañía los productos que quedaron en "Otros". La sincronización y la instalación deducen la compañía del nombre cuando Emida no la manda.
+
+### Correcciones
+- `disponible_para_retirar` restaba dos veces las ventas en vuelo de cajas con límite y podía salir negativo. Se ajustaron dos pruebas que esperaban el valor equivocado.
+- El traspaso no veía una suspensión reciente del administrador: ahora relee de la base.
+- Se quitaron dos `print` en `proveedor/cliente.py` que podían escribir PINs en los logs.
+
+### Migraciones
+- `core/0003_administrador_estado`
+- `identidad/0004_acciones_retiro_y_acceso`
+- `saldo/0005_retiro_y_retencion`
+
+Aditivas: los administradores existentes quedan `activo`.
+
+### Pruebas
+290, todas pasan (eran 242).

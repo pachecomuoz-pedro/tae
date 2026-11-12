@@ -33,6 +33,8 @@ Este documento explica **por qué** el sistema es como es. Cada decisión tiene 
 | 23 | El saldo de Emida no es el saldo de la red | Dinero |
 | 24 | El catálogo se sincroniza a diario, pero una persona decide qué se vende | Producto / proveedor |
 | 25 | Las tareas programadas viven en un contenedor, no en el crontab | Técnica |
+| 26 | Suspensión en cada nivel y acceso por persona | Negocio / seguridad |
+| 27 | Retiro a EPS y retención de red para fondeos de más | Dinero |
 
 ---
 
@@ -276,6 +278,39 @@ El segundo factor se activa desde la terminal con `preparar_super_admin`. Reinic
 **Por qué.** Las pruebas contra UAT se hacen en Windows, que no tiene crontab. Un contenedor funciona igual en Windows y en el servidor Linux, y se levanta y se detiene con el resto de la plataforma. Si el contenedor se reinicia después de la hora del catálogo y hoy no se ha sincronizado, sincroniza al arrancar.
 
 **Consecuencias.** Nunca deben correr al mismo tiempo el contenedor y las líneas equivalentes del crontab: las tareas correrían doble. `deploy/crontab.ejemplo` trae esas líneas comentadas, como alternativa.
+
+## 26. Suspensión en cada nivel y acceso por persona
+
+**Contexto.** Solo se podía suspender a un cliente. No había forma de detener a un administrador, de apagar una caja sola, ni de quitarle la entrada a un cajero que dejó de trabajar sin bloquear su caja para los demás.
+
+**Decisión.**
+- **Administrador:** nuevo campo `estado` (activo o suspendido), que solo cambia el Super Admin. La cascada **se deriva** en `Cliente.puede_operar` y no se escribe en cada cliente ni en cada caja.
+- **Cliente:** sin cambios. Su cascada sí escribe `estado_previo` en las cajas.
+- **Caja:** se suspende sola. Queda con `estado_previo` vacío, que es la marca de "suspendida a mano": reactivar a su cliente no la revive. No se reactiva si su cliente está suspendido.
+- **Persona:** `is_active` en el usuario. Sigue el mismo camino que el restablecimiento de contraseña: cada nivel sobre los de abajo y nadie sobre sí mismo. Al intentar entrar con la contraseña correcta se le dice el motivo real.
+- Nada se borra: el ledger y las bitácoras apuntan a esas entidades.
+
+**Por qué.** Derivar la cascada del administrador evita reescribir cientos de filas al suspender y, sobre todo, al reactivar: cada cliente vuelve a su estado exacto, incluido uno que ya estaba suspendido a mano. Separar a la persona de la entidad permite dar de baja a un cajero sin detener la venta.
+
+**Consecuencias.** `Cliente.puede_operar` ahora consulta a su administrador; las consultas calientes usan `select_related("cliente__administrador")`. El mensaje de por qué no opera vive en `Cliente.motivo_no_opera`. Endpoints: `red/suspension` y `usuarios/acceso`.
+
+## 27. Retiro a EPS y retención de red para fondeos de más
+
+**Contexto.** Se fondean 110 a un administrador y debían ser 106. Para cuando se detecta, el administrador ya traspasó los 110 a sus clientes y estos los asignaron a sus cajas. Retirar los 4 obligaba a elegir de qué cliente o caja quitarlos.
+
+**Decisión.**
+- **Retiro a EPS** (`services.retirar_a_eps`): el Super Admin regresa saldo de un administrador o un cliente a la cuenta de fondeo, con motivo y folio `RET-`. Solo toma lo disponible: nunca lo apartado por ventas en vuelo, y en un cliente tampoco lo asignado a sus cajas.
+- **Corrección con retención** (`services.corregir_fondeo`): retira lo disponible y el faltante se convierte en una `Retencion` sobre el administrador (o el cliente). Cada venta de esa rama pasa solo si el saldo de red, después de la venta, queda igual o arriba de lo retenido. Al llegar ahí, la rama deja de vender.
+- **Liquidación:** el siguiente fondeo del titular cubre primero la retención (y en un cliente también un traspaso de su administrador). La liquidación sale con su propio folio y apunta a la retención (`Operacion.retencion`). El Super Admin puede cancelarla con nota.
+- **Dos saldos a la vista:** *Disponible* (lo que el titular mueve hoy) y *Saldo red* (lo que queda por vender en su rama).
+
+**Por qué.** La red termina vendiendo exactamente lo que debió recibir, sin castigar a nadie antes de tiempo y sin que el Super Admin tenga que escoger una caja. Las bolsas nunca quedan en negativo y la corrección queda visible en el ledger, que sigue siendo de solo inserción (decisión 5).
+
+**Consecuencias.**
+- **Candados:** toda venta, fondeo y traspaso bloquea primero las retenciones activas de la rama y después las bolsas (decisión 9). Las ventas de una rama con retención se ponen en fila; las ramas sin retención no pagan nada, porque la consulta no encuentra filas que bloquear.
+- Un retiro directo puede dejar una rama por debajo de su retención; en ese caso la rama se detiene hasta el siguiente fondeo, que es el comportamiento buscado.
+- Endpoints: `retiros/eps`, `retenciones` y `retenciones/cancelar`. Pantalla: "Abonos y retiros" del Super Admin.
+- Corrección relacionada: `disponible_para_retirar` restaba dos veces las ventas en vuelo de cajas con límite (el límite ya las incluye).
 
 ## Cómo agregar una decisión
 

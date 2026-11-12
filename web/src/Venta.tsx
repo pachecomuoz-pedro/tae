@@ -8,6 +8,11 @@
  *    dos veces cuesta tres segundos al cajero y evita la única clase de
  *    error que nadie puede deshacer.
  *
+ * 3. **Si la caja no puede vender, se dice antes.** El servidor manda el
+ *    motivo junto con el saldo (sin límite asignado, caja suspendida,
+ *    saldo retenido). Dejar capturar producto y número para rechazar al
+ *    final es lo que hizo pensar "tengo saldo y no me deja".
+ *
  * 2. **Los tres desenlaces se ven distintos.** `sin_resolver` no se pinta
  *    como aprobada ni como rechazada. Si se viera aprobada, el cajero cobra
  *    tiempo aire que quizá no salió; si se viera rechazada, vuelve a vender
@@ -43,7 +48,18 @@ export function Venta({ saldo, alCambiarSaldo }: {
   const montoFinal = elegido?.tipo_monto === "fijo" ? elegido.monto_fijo ?? "" : monto;
   const numeroCompleto = numero.length === 10;
   const coinciden = numeroCompleto && numero === confirmacion;
-  const listo = Boolean(elegido) && coinciden && Number(montoFinal) > 0;
+  // Sin saldo todavía (cargando) no se bloquea: el servidor valida igual.
+  const bloqueo = saldo?.venta && !saldo.venta.puede ? saldo.venta.motivo : "";
+  const cajaDisponible = saldo?.mi_caja?.disponible ? Number(saldo.mi_caja.disponible) : null;
+  const noAlcanza = cajaDisponible !== null && Number(montoFinal) > cajaDisponible;
+  const listo = Boolean(elegido) && coinciden && Number(montoFinal) > 0 && !bloqueo && !noAlcanza;
+
+  // Agrupados por compañía: tres botones de $50 sin decir de quién son es
+  // la forma más fácil de vender el producto equivocado.
+  const grupos = productos.reduce<Record<string, Producto[]>>((g, p) => {
+    (g[p.carrier] ||= []).push(p);
+    return g;
+  }, {});
 
   function reiniciar() {
     setElegido(null);
@@ -79,32 +95,49 @@ export function Venta({ saldo, alCambiarSaldo }: {
   return (
     <div className="grid gap-5 lg:grid-cols-[1fr_380px]">
       <div className="space-y-5">
+        {bloqueo && (
+          <div className="rounded-2xl border border-[#F3C9C6] bg-alerta-fondo p-5" data-prueba="bloqueo">
+            <p className="font-display text-base font-bold text-alerta-oscuro">
+              Esta caja no puede vender ahora
+            </p>
+            <p className="mt-1 text-sm text-alerta-oscuro">{bloqueo}</p>
+          </div>
+        )}
+
         <Tarjeta titulo="Paso 1 · Producto">
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-            {productos.map((p) => {
-              const activo = elegido?.sku === p.sku;
-              return (
-                <button
-                  key={p.sku}
-                  type="button"
-                  onClick={() => { setElegido(p); setMonto(""); }}
-                  data-sku={p.sku}
-                  className={
-                    "rounded-xl border p-3 text-left transition " +
-                    (activo
-                      ? "border-2 border-primario bg-elegido"
-                      : "border-borde bg-white hover:border-campo")
-                  }
-                >
-                  <span className="block text-xs text-apagado">{p.carrier}</span>
-                  <span className="block font-display text-base font-bold">
-                    {p.etiqueta_monto}
-                  </span>
-                </button>
-              );
-            })}
+          <div className="space-y-4">
+            {Object.entries(grupos).map(([carrier, lista]) => (
+              <div key={carrier}>
+                <p className="mb-2 font-display text-sm font-bold text-tinta">{carrier}</p>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  {lista.map((p) => {
+                    const activo = elegido?.sku === p.sku;
+                    return (
+                      <button
+                        key={p.sku}
+                        type="button"
+                        onClick={() => { setElegido(p); setMonto(""); }}
+                        data-sku={p.sku}
+                        title={p.nombre}
+                        className={
+                          "rounded-xl border p-3 text-left transition " +
+                          (activo
+                            ? "border-2 border-primario bg-elegido"
+                            : "border-borde bg-white hover:border-campo")
+                        }
+                      >
+                        <span className="block font-display text-base font-bold">
+                          {p.etiqueta_monto}
+                        </span>
+                        <span className="mt-0.5 block truncate text-xs text-apagado">{p.nombre}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
             {productos.length === 0 && (
-              <p className="col-span-full text-sm text-apagado">
+              <p className="text-sm text-apagado">
                 No hay productos disponibles ahora mismo.
               </p>
             )}
@@ -165,6 +198,12 @@ export function Venta({ saldo, alCambiarSaldo }: {
             </p>
           </div>
 
+          {noAlcanza && !bloqueo && (
+            <p className="mt-4 rounded-xl bg-ambar-fondo p-3 text-xs font-semibold text-ambar-texto"
+               data-prueba="no-alcanza">
+              Esta caja tiene {pesos(cajaDisponible)} disponibles: no alcanza para esta recarga.
+            </p>
+          )}
           {error && <Aviso error={error} />}
 
           <button
@@ -251,6 +290,15 @@ function Cierre({ resultado, alSeguir }: {
           <p className="font-display text-2xl font-bold tracking-wide" data-prueba="folio">
             {resultado.folio}
           </p>
+          {resultado.desenlace === "rechazada" && (resultado.mensaje || resultado.codigo) && (
+            <p className="mt-2 text-sm" data-prueba="motivo-rechazo">
+              <span className="font-semibold">Motivo: </span>
+              {resultado.mensaje || "El proveedor no dio un motivo"}
+              {resultado.codigo && (
+                <span className="ml-1 text-xs text-apagado">(código {resultado.codigo})</span>
+              )}
+            </p>
+          )}
           {resultado.autorizacion && (
             <p className="mt-2 text-xs text-apagado">
               Autorización del carrier · {resultado.autorizacion}

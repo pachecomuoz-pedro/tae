@@ -48,10 +48,29 @@ class EntidadBase(models.Model):
         abstract = True
 
 
+class EstadoAdministrador(models.TextChoices):
+    """
+    Un administrador no pasa por aprobación (solo lo crea el Super Admin),
+    así que solo tiene dos estados. Suspenderlo detiene toda su red sin
+    tocar el estado de sus clientes y cajas: ver Cliente.puede_operar.
+    """
+
+    ACTIVO = "activo", "Activo"
+    SUSPENDIDO = "suspendido", "Suspendido"
+
+
 class Administrador(EntidadBase):
     """Recibe saldo del Super Admin y lo reparte entre sus clientes."""
 
     responsable = models.CharField(max_length=160, blank=True)
+    estado = models.CharField(
+        max_length=12, choices=EstadoAdministrador.choices, default=EstadoAdministrador.ACTIVO
+    )
+
+    @property
+    def puede_operar(self):
+        """Puede recibir y repartir saldo, y su red puede vender."""
+        return self.activo and self.estado == EstadoAdministrador.ACTIVO
 
     class Meta:
         db_table = "core_administrador"
@@ -122,8 +141,30 @@ class Cliente(EntidadBase):
 
     @property
     def puede_operar(self):
-        """Puede recibir saldo y sus cajas pueden vender."""
-        return self.activo and self.estado == EstadoCliente.APROBADO
+        """
+        Puede recibir saldo y sus cajas pueden vender.
+
+        Incluye a su administrador: suspender un administrador detiene a
+        toda su red sin reescribir el estado de cada cliente. Así, al
+        reactivarlo, cada cliente queda exactamente como estaba (un cliente
+        suspendido a mano sigue suspendido).
+        """
+        return (
+            self.activo
+            and self.estado == EstadoCliente.APROBADO
+            and self.administrador.puede_operar
+        )
+
+    @property
+    def motivo_no_opera(self):
+        """Por qué no puede operar, en una frase. Vacío si sí puede."""
+        if self.estado != EstadoCliente.APROBADO:
+            return f"{self.nombre} está {self.get_estado_display().lower()}"
+        if not self.activo:
+            return f"{self.nombre} está dado de baja"
+        if not self.administrador.puede_operar:
+            return f"La red de {self.administrador.nombre} está suspendida"
+        return ""
 
 
 class EstadoPuntoVenta(models.TextChoices):

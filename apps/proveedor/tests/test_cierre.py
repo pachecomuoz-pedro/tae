@@ -192,10 +192,12 @@ class EsquemaDeReintentos(Base):
         bolsa = services.bolsa_de(self.m.cliente)
         self.assertEqual(bolsa.saldo, self.saldo_inicial)      # no se cobró
         self.assertEqual(bolsa.reservado, D("100.0000"))       # pero sigue apartado
-        # Y por lo tanto ese dinero no se puede retirar.
+        # Y por lo tanto ese dinero no se puede retirar: queda dentro del
+        # límite de 5,000 de la caja, que ya se resta completo. Restarlo otra
+        # vez era contarlo dos veces.
         self.assertEqual(
             services.disponible_para_retirar(self.m.cliente),
-            self.saldo_inicial - D("5000") - D("100"),
+            self.saldo_inicial - D("5000"),
         )
         self.assertEqual(len(emulador.lookups), 3)
 
