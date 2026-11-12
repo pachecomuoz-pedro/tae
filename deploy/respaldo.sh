@@ -3,7 +3,7 @@
 # Programarlo y copiar los respaldos FUERA del servidor: docs/DESPLIEGUE.md, paso 12.
 set -euo pipefail
 
-RAIZ=/opt/tae
+RAIZ=/home/tae
 cd "$RAIZ"
 set -a; source .env; set +a
 
