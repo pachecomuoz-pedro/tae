@@ -80,7 +80,7 @@ services:
     logging: *bitacora
     ports:
       # Solo el Nginx del servidor llega aquí; el HTTPS lo hace él.
-      - "127.0.0.1:8080:80"
+      - "8080:80"
     volumes:
       - estaticos:/usr/share/nginx/static:ro
     depends_on:
