@@ -14,7 +14,7 @@
  */
 import { useEffect, useState } from "react";
 
-import { ClienteFila, ErrorAPI, api, pesos } from "./api";
+import { ClienteFila, ErrorAPI, api, nuevaLlave, pesos } from "./api";
 import { Aviso, Campo, Tarjeta } from "./piezas";
 
 const MOTIVOS = [
@@ -109,6 +109,10 @@ function Traspaso({ cliente, alHecho }: { cliente: ClienteFila; alHecho: () => v
   const [pideCodigo, setPideCodigo] = useState(false);
   const [error, setError] = useState<ErrorAPI | null>(null);
   const [folio, setFolio] = useState("");
+  // Una llave por intención: si pide el segundo factor y se reenvía, es la
+  // misma operación y conserva la llave; un monto nuevo es otra intención.
+  const [llave, setLlave] = useState(nuevaLlave);
+  const [enviando, setEnviando] = useState(false);
 
   const paga = Number(monto || 0);
   const margen = Number(cliente.margen_pct || 0);
@@ -118,17 +122,22 @@ function Traspaso({ cliente, alHecho }: { cliente: ClienteFila; alHecho: () => v
   async function enviar() {
     setError(null);
     setFolio("");
+    if (enviando) return;
+    setEnviando(true);
     try {
-      const r = await api.traspasar(cliente.uuid, monto, codigo || undefined);
-      setFolio(r.folio);
+      const r = await api.traspasar(cliente.uuid, monto, codigo || undefined, llave);
+      setFolio(r.repetida ? `${r.folio} (ya se había aplicado)` : r.folio);
       setMonto("");
       setCodigo("");
       setPideCodigo(false);
+      setLlave(nuevaLlave());
       alHecho();
     } catch (e) {
       const fallo = e as ErrorAPI;
       if (fallo.clave === "segundo_factor") setPideCodigo(true);
       setError(fallo);
+    } finally {
+      setEnviando(false);
     }
   }
 
@@ -182,7 +191,7 @@ function Traspaso({ cliente, alHecho }: { cliente: ClienteFila; alHecho: () => v
       <button
         type="button"
         onClick={enviar}
-        disabled={paga <= 0}
+        disabled={paga <= 0 || enviando}
         data-prueba="traspasar"
         className={
           "mt-4 w-full rounded-xl py-3.5 font-display font-bold " +
@@ -202,6 +211,8 @@ function Retiro({ cliente, alHecho }: { cliente: ClienteFila; alHecho: () => voi
   const [nota, setNota] = useState("");
   const [error, setError] = useState<ErrorAPI | null>(null);
   const [folio, setFolio] = useState("");
+  const [llave, setLlave] = useState(nuevaLlave);
+  const [enviando, setEnviando] = useState(false);
 
   const retirable = Number(cliente.retirable || 0);
   const pedido = Number(monto || 0);
@@ -213,14 +224,19 @@ function Retiro({ cliente, alHecho }: { cliente: ClienteFila; alHecho: () => voi
   async function enviar() {
     setError(null);
     setFolio("");
+    if (enviando) return;
+    setEnviando(true);
     try {
-      const r = await api.retirar(cliente.uuid, monto, motivo, tipo, nota);
-      setFolio(r.folio);
+      const r = await api.retirar(cliente.uuid, monto, motivo, tipo, nota, llave);
+      setFolio(r.repetida ? `${r.folio} (ya se había aplicado)` : r.folio);
       setMonto("");
       setNota("");
+      setLlave(nuevaLlave());
       alHecho();
     } catch (e) {
       setError(e as ErrorAPI);
+    } finally {
+      setEnviando(false);
     }
   }
 
@@ -320,7 +336,7 @@ function Retiro({ cliente, alHecho }: { cliente: ClienteFila; alHecho: () => voi
       <button
         type="button"
         onClick={enviar}
-        disabled={!listo}
+        disabled={!listo || enviando}
         data-prueba="retirar"
         className={
           "mt-4 w-full rounded-xl py-3.5 font-display font-bold " +

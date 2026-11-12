@@ -28,7 +28,7 @@ from apps.saldo import services
 from apps.saldo.models import EstadoRetencion, Motivo, Operacion, Retencion
 
 from .permisos_http import Operativo
-from .vistas import _ip, error, manejar
+from .vistas import _ip, clave_de, error, manejar
 
 
 def _sin_cache(respuesta):
@@ -112,6 +112,7 @@ def red(request):
                 "uuid": str(a.uuid),
                 "nombre": a.nombre,
                 "responsable": a.responsable,
+                "margen_pct": str(a.margen_pct),
                 "estado": a.estado if a.activo else "inactivo",
                 "padre": None,
                 "saldo": str(services.bolsa_de(a).saldo),
@@ -137,6 +138,7 @@ def red(request):
                 "padre": c.administrador.nombre,
                 "saldo": str(services.bolsa_de(c).saldo),
                 "modo_bolsa": c.modo_bolsa,
+                "margen_pct": str(c.margen_pct),
                 **services.resumen_saldos(c),
                 "usuario": _usuario_json(c.usuarios.first()),
             }
@@ -187,6 +189,7 @@ def alta_administrador(request):
         nombre=request.data.get("nombre", "").strip(),
         responsable=request.data.get("responsable", "").strip(),
         correo_responsable=request.data.get("correo") or None,
+        margen_pct=request.data.get("margen_pct", "0"),
     )
     return _sin_cache(Response(_alta_json(administrador, "administrador"),
                                status=status.HTTP_201_CREATED))
@@ -372,7 +375,7 @@ def fondear_administrador(request):
     administrador = _buscar(Administrador, request, "administrador",
                             "Ese administrador no existe o no es tuyo")
     operacion = acciones.fondear_administrador(
-        request.user, administrador, request.data.get("monto", "0")
+        request.user, administrador, request.data.get("monto", "0"), clave=clave_de(request),
     )
     return Response(
         {"folio": operacion.folio, "administrador": administrador.nombre,
@@ -395,7 +398,9 @@ def fondear_cliente(request):
     (`puntos-venta/limite`), porque el dinero vive en la bolsa del cliente.
     """
     cliente = _buscar(Cliente, request, "cliente", "Ese cliente no existe o no es tuyo")
-    operacion = acciones.fondear_cliente(request.user, cliente, request.data.get("monto", "0"))
+    operacion = acciones.fondear_cliente(
+        request.user, cliente, request.data.get("monto", "0"), clave=clave_de(request),
+    )
     return Response(
         {"folio": operacion.folio, "cliente": cliente.nombre,
          "saldo": str(services.bolsa_de(cliente).saldo),
@@ -466,7 +471,7 @@ def retirar_a_eps(request):
         request.user, titular, request.data.get("monto", "0"),
         motivo=motivo, nota=request.data.get("nota", ""),
         retener_faltante=bool(request.data.get("retener_faltante")),
-        operacion_origen=origen,
+        operacion_origen=origen, clave=clave_de(request),
     )
     return Response(
         {
@@ -573,3 +578,17 @@ def acceso(request):
         raise permisos.PermisoDenegado("Ese usuario no existe o no está bajo tu alcance")
     acciones.cambiar_acceso(request.user, objetivo, activo=bool(request.data.get("activo")))
     return Response(_usuario_json(objetivo))
+
+
+
+@api_view(["POST"])
+@permission_classes([Operativo])
+@manejar
+def cambiar_margen(request):
+    """
+    Cambia el margen: {"tipo": "administrador"|"cliente", "uuid", "margen_pct"}.
+    Aplica a lo que venga; lo ya fondeado o traspasado conserva el suyo.
+    """
+    entidad = _titular(request)
+    acciones.cambiar_margen(request.user, entidad, request.data.get("margen_pct"))
+    return Response({"nombre": entidad.nombre, "margen_pct": str(entidad.margen_pct)})

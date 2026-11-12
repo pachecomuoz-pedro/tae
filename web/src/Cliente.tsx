@@ -21,6 +21,8 @@ export function PuntosVenta({ saldo, alCambiar }: {
   const [monto, setMonto] = useState("");
   const [error, setError] = useState<ErrorAPI | null>(null);
   const [listo, setListo] = useState("");
+  const [modo, setModo] = useState<"asignar" | "retirar">("asignar");
+  const [motivo, setMotivo] = useState("");
 
   const cargar = () => api.puntosVenta().then(setCajas).catch(() => setCajas([]));
 
@@ -42,13 +44,17 @@ export function PuntosVenta({ saldo, alCambiar }: {
   const excede = propuesto > tope;
   const libre = Math.max(bolsa - asignadoAOtras - propuesto, 0);
   const compartida = saldo?.modo_bolsa === "compartida";
+  // Bajar el límite es un retiro: el servidor exige motivo, y aquí se pide
+  // antes de enviar para no rechazar a ciegas.
+  const actual = Number(elegida?.limite ?? 0);
+  const baja = elegida !== null && monto !== "" && propuesto < actual;
 
   async function asignar() {
     if (!elegida) return;
     setError(null);
     setListo("");
     try {
-      const r = await api.asignarLimite(elegida.uuid, monto || "0");
+      const r = await api.asignarLimite(elegida.uuid, monto || "0", baja ? motivo : "");
       setListo(`${r.punto_venta} quedó en ${pesos(r.limite)}`);
       setMonto("");
       setElegida(null);
@@ -120,6 +126,24 @@ export function PuntosVenta({ saldo, alCambiar }: {
             )}
 
             {elegida && (
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {(["asignar", "retirar"] as const).map((m) => (
+                  <button key={m} type="button" data-modo-caja={m}
+                          onClick={() => { setModo(m); setError(null); setListo(""); }}
+                          className={"rounded-xl border p-2.5 text-sm font-bold " +
+                            (modo === m ? "border-2 border-primario bg-elegido" : "border-borde")}>
+                    {m === "asignar" ? "Asignar" : "Retirar"}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {elegida && modo === "retirar" && (
+              <RetirarDeCaja caja={elegida}
+                             alHecho={(t) => { setListo(t); setElegida(null); cargar(); alCambiar(); }} />
+            )}
+
+            {elegida && modo === "asignar" && (
               <>
                 <p className="mt-3 text-sm font-semibold">{elegida.nombre}</p>
                 <dl className="mt-3 space-y-1.5 text-sm">
@@ -167,16 +191,26 @@ export function PuntosVenta({ saldo, alCambiar }: {
                   </p>
                 )}
 
+                {baja && (
+                  <div className="mt-3 rounded-xl bg-ambar-fondo p-3">
+                    <p className="mb-2 text-xs font-semibold text-ambar-texto">
+                      Bajas el límite de {pesos(actual)} a {pesos(propuesto)}: es un retiro de{" "}
+                      {pesos(actual - propuesto)} y lleva motivo.
+                    </p>
+                    <SelectorMotivo valor={motivo} alCambiar={setMotivo} />
+                  </div>
+                )}
+
                 {error && <Aviso error={error} />}
 
                 <button
                   type="button"
                   onClick={asignar}
-                  disabled={excede || propuesto <= 0}
+                  disabled={excede || propuesto < 0 || monto === "" || (baja && !motivo)}
                   data-prueba="asignar"
                   className={
                     "mt-4 w-full rounded-xl py-3.5 font-display font-bold transition " +
-                    (!excede && propuesto > 0
+                    (!excede && monto !== "" && !(baja && !motivo)
                       ? "bg-primario text-white"
                       : "cursor-not-allowed bg-[#D3D9E1] text-[#7A8699]")
                   }
@@ -197,6 +231,84 @@ export function PuntosVenta({ saldo, alCambiar }: {
           </div>
         </aside>
       )}
+    </div>
+  );
+}
+
+const MOTIVOS_CAJA = [
+  ["captura", "Error de captura en el monto"],
+  ["cliente_equivocado", "Se asignó a la caja equivocada"],
+  ["suspension", "Recuperación de saldo de la caja"],
+  ["otro", "Otro"],
+] as const;
+
+function SelectorMotivo({ valor, alCambiar }: { valor: string; alCambiar: (v: string) => void }) {
+  return (
+    <select value={valor} onChange={(e) => alCambiar(e.target.value)} data-prueba="motivo-caja"
+            className="w-full rounded-xl border border-campo bg-white px-3 py-2.5 text-sm outline-none focus:border-primario">
+      <option value="">Elige el motivo…</option>
+      {MOTIVOS_CAJA.map(([c, t]) => <option key={c} value={c}>{t}</option>)}
+    </select>
+  );
+}
+
+/**
+ * Retirar saldo de una caja: baja su límite en el monto. El dinero nunca
+ * salió de la bolsa del cliente (decisión 7), así que vuelve a quedar libre
+ * para otra caja. No se puede retirar lo que la caja tiene en ventas en
+ * vuelo; el servidor lo verifica con la fila bloqueada.
+ */
+function RetirarDeCaja({ caja, alHecho }: { caja: PuntoVenta; alHecho: (t: string) => void }) {
+  const [monto, setMonto] = useState("");
+  const [motivo, setMotivo] = useState("");
+  const [nota, setNota] = useState("");
+  const [error, setError] = useState<ErrorAPI | null>(null);
+  const [enviando, setEnviando] = useState(false);
+  const limite = Number(caja.limite ?? 0);
+  const pedido = Number(monto || 0);
+  const excede = pedido > limite;
+  const listo = pedido > 0 && !excede && motivo !== "" && (motivo !== "otro" || nota.trim().length > 3);
+
+  async function retirar() {
+    if (enviando) return;
+    setEnviando(true);
+    setError(null);
+    try {
+      const r = await api.retirarDeCaja(caja.uuid, monto, motivo, nota);
+      alHecho(`Se retiraron ${pesos(pedido)} de ${r.punto_venta}; su límite quedó en ${pesos(r.limite)}.`);
+    } catch (e) {
+      setError(e as ErrorAPI);
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  return (
+    <div className="mt-4 space-y-3">
+      <dl className="space-y-1.5 text-sm">
+        <Renglon t={`Saldo asignado a ${caja.nombre}`} v={pesos(limite)} acento />
+      </dl>
+      <Campo etiqueta="Monto a retirar" valor={monto} marcador="0.00" prueba="monto-retiro-caja"
+             alCambiar={(v) => setMonto(v.replace(/[^0-9.]/g, ""))} malo={excede} />
+      {excede && (
+        <p className="rounded-xl bg-alerta-fondo p-3 text-xs font-semibold text-alerta-oscuro">
+          La caja solo tiene {pesos(limite)} asignados.
+        </p>
+      )}
+      <label className="block">
+        <span className="mb-1.5 block text-xs font-bold text-tinta-dos">Motivo · obligatorio</span>
+        <SelectorMotivo valor={motivo} alCambiar={setMotivo} />
+      </label>
+      <Campo etiqueta={motivo === "otro" ? 'Nota · obligatoria para "Otro"' : "Nota · opcional"}
+             valor={nota} alCambiar={setNota} texto marcador="Queda en el historial de la caja" />
+      {error && <Aviso error={error} />}
+      <button type="button" onClick={retirar} disabled={!listo || enviando} data-prueba="retirar-caja"
+              className="w-full rounded-xl bg-ambar py-3.5 font-display font-bold text-white disabled:bg-[#D3D9E1] disabled:text-[#7A8699]">
+        {enviando ? "Retirando…" : "Retirar de la caja"}
+      </button>
+      <p className="text-center text-[11px] text-apagado">
+        El saldo regresa a tu bolsa, libre para otra caja. Queda en el historial con tu nombre.
+      </p>
     </div>
   );
 }

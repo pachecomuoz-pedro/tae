@@ -238,8 +238,11 @@ def _cerrar(registro, desenlace, reserva, *, respuesta=None, intentos=0, detalle
     if respuesta is not None:
         registro.transaction_id = respuesta.transaction_id
         registro.control_no = respuesta.control_no
+        registro.carrier_control_no = respuesta.carrier_control_no
         registro.response_code = respuesta.response_code
         registro.h2h_result_code = respuesta.h2h_result_code
+        registro.pin = respuesta.pin
+    registro.response_message = (mensaje or getattr(respuesta, "mensaje", "") or "")[:4000]
     registro.save()
 
     reserva.refresh_from_db()

@@ -117,7 +117,7 @@ function Credencial({ correo, temporal, alCerrar }: {
   );
 }
 
-function Modal({ titulo, alCerrar, children }: {
+export function Modal({ titulo, alCerrar, children }: {
   titulo: string;
   alCerrar: () => void;
   children: React.ReactNode;
@@ -235,6 +235,7 @@ export function Red({ perfil, alCambiar }: { perfil: Perfil; alCambiar: () => vo
   const [fondear, setFondear] = useState<FilaRed | null>(null);
   const [suspender, setSuspender] = useState<FilaRed | null>(null);
   const [acceso, setAcceso] = useState<FilaRed | null>(null);
+  const [margenDe, setMargenDe] = useState<FilaRed | null>(null);
 
   const cargar = () => {
     setError(null);
@@ -364,6 +365,15 @@ export function Red({ perfil, alCambiar }: { perfil: Perfil; alCambiar: () => vo
                         {f.estado === "suspendido" ? "Reactivar" : "Suspender"}
                       </button>
                     )}
+                    {f.margen_pct !== undefined && (
+                      (perfil.rol === "super_admin" && f.tipo !== "punto_venta") ||
+                      (perfil.rol === "administrador" && f.tipo === "cliente")
+                    ) && (
+                      <button type="button" onClick={() => setMargenDe(f)} data-prueba="margen"
+                              className="rounded-lg border border-campo bg-white px-3 py-1.5 text-xs font-bold text-tinta-dos">
+                        Margen {Number(f.margen_pct)}%
+                      </button>
+                    )}
                     {!!f.usuario && f.usuario.uuid !== perfil.uuid && perfil.capacidades.cambiar_acceso && (
                       <button type="button" onClick={() => setAcceso(f)} data-prueba="acceso"
                               className="rounded-lg border border-campo bg-white px-3 py-1.5 text-xs font-bold text-tinta-dos">
@@ -400,6 +410,9 @@ export function Red({ perfil, alCambiar }: { perfil: Perfil; alCambiar: () => vo
       {acceso && (
         <AccesoModal fila={acceso} alCerrar={() => { setAcceso(null); cargar(); }} />
       )}
+      {margenDe && (
+        <MargenModal fila={margenDe} alCerrar={() => { setMargenDe(null); cargar(); }} />
+      )}
     </div>
   );
 }
@@ -413,7 +426,7 @@ function AltaModal({ tipo, perfil, alCerrar }: {
   const [correo, setCorreo] = useState("");
   const [responsable, setResponsable] = useState("");
   const [rfc, setRfc] = useState("");
-  const [margen, setMargen] = useState("4");
+  const [margen, setMargen] = useState("0");
   const [direccion, setDireccion] = useState("");
   const [limite, setLimite] = useState("");
   const [padre, setPadre] = useState("");
@@ -446,7 +459,7 @@ function AltaModal({ tipo, perfil, alCerrar }: {
     setError(null);
     try {
       if (tipo === "administrador") {
-        setHecho(await api.altaAdministrador({ nombre, responsable, correo }));
+        setHecho(await api.altaAdministrador({ nombre, responsable, correo, margen_pct: margen }));
       } else if (tipo === "cliente") {
         setHecho(await api.altaCliente({
           administrador: eligePadre ? padre : undefined, nombre, rfc, margen_pct: margen, correo,
@@ -504,20 +517,19 @@ function AltaModal({ tipo, perfil, alCerrar }: {
                     valor={nombre} alCambiar={setNombre}
                     marcador={tipo === "punto_venta" ? "Caja 3" : "Abarrotes El Sol"} />
         {tipo === "administrador" && (
-          <CampoTexto etiqueta="Responsable" valor={responsable} alCambiar={setResponsable} />
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <CampoTexto etiqueta="Responsable" valor={responsable} alCambiar={setResponsable} />
+            </div>
+            <CampoMargen valor={margen} alCambiar={setMargen} />
+          </div>
         )}
         {tipo === "cliente" && (
           <div className="flex gap-3">
             <div className="flex-1">
               <CampoTexto etiqueta="RFC" valor={rfc} alCambiar={(v) => setRfc(v.toUpperCase())} />
             </div>
-            <label className="block w-32">
-              <span className="mb-1.5 block text-xs font-bold text-tinta-dos">Margen</span>
-              <select value={margen} onChange={(e) => setMargen(e.target.value)}
-                      className="w-full rounded-xl border border-campo bg-white px-3.5 py-3 text-sm">
-                {["0", "3", "4", "5"].map((m) => <option key={m} value={m}>{m}%</option>)}
-              </select>
-            </label>
+            <CampoMargen valor={margen} alCambiar={setMargen} />
           </div>
         )}
         {tipo === "punto_venta" && (
@@ -664,6 +676,63 @@ function FondeoModal({ fila, alCerrar }: { fila: FilaRed; alCerrar: () => void }
           </div>
         </div>
       )}
+    </Modal>
+  );
+}
+
+/** Margen en porcentaje: cualquier valor de 0 a 100, con dos decimales. */
+function CampoMargen({ valor, alCambiar }: { valor: string; alCambiar: (v: string) => void }) {
+  return (
+    <label className="block w-32">
+      <span className="mb-1.5 block text-xs font-bold text-tinta-dos">Margen %</span>
+      <input inputMode="decimal" value={valor} data-prueba="campo-margen"
+             onChange={(e) => alCambiar(e.target.value.replace(/[^0-9.]/g, "").slice(0, 6))}
+             className="w-full rounded-xl border border-campo bg-white px-3.5 py-3 text-sm outline-none focus:border-primario" />
+    </label>
+  );
+}
+
+function MargenModal({ fila, alCerrar }: { fila: FilaRed; alCerrar: () => void }) {
+  const [margen, setMargen] = useState(String(Number(fila.margen_pct ?? 0)));
+  const [error, setError] = useState<ErrorAPI | null>(null);
+  const n = Number(margen);
+  const valido = margen !== "" && !Number.isNaN(n) && n >= 0 && n <= 100;
+
+  async function guardar() {
+    setError(null);
+    try {
+      await api.cambiarMargen(fila.tipo as "administrador" | "cliente", fila.uuid, margen);
+      alCerrar();
+    } catch (e) {
+      setError(e as ErrorAPI);
+    }
+  }
+
+  return (
+    <Modal titulo={`Margen de ${fila.nombre}`} alCerrar={alCerrar}>
+      <div className="space-y-4">
+        <CampoMargen valor={margen} alCambiar={setMargen} />
+        <p className="text-sm">
+          {fila.tipo === "administrador"
+            ? <>Con {valido ? n : "—"}%, por cada $1,000 que se le fondeen recibirá{" "}
+                <b>{pesos(1000 * (1 + (valido ? n : 0) / 100))}</b>.</>
+            : <>Con {valido ? n : "—"}%, por cada $1,000 que pague recibirá{" "}
+                <b>{pesos(1000 * (1 + (valido ? n : 0) / 100))}</b>.</>}
+        </p>
+        <p className="rounded-xl bg-suave p-3 text-xs text-tinta-dos">
+          Aplica a lo que venga. Lo ya fondeado o traspasado conserva su margen: si después
+          se devuelve, se revierte con el que se otorgó.
+        </p>
+        {error && <Aviso error={error} />}
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={alCerrar}
+                  className="rounded-xl border border-campo px-5 py-3 text-sm font-bold">Cancelar</button>
+          <button type="button" onClick={guardar} disabled={!valido} data-prueba="guardar-margen"
+                  className="rounded-xl bg-primario px-5 py-3 text-sm font-bold text-white disabled:opacity-50">
+            Guardar
+          </button>
+        </div>
+      </div>
     </Modal>
   );
 }

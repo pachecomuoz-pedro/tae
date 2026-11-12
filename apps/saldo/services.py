@@ -39,6 +39,7 @@ from .models import (
     EstadoReserva,
     EstadoRetencion,
     Motivo,
+    MovimientoLimite,
     Operacion,
     Reserva,
     Retencion,
@@ -212,7 +213,7 @@ def _asentar(operacion, movimientos):
 
 
 def _crear_operacion(inquilino, tipo, *, motivo="", nota="", autorizado_por="",
-                     punto_venta=None, operacion_origen=None):
+                     punto_venta=None, operacion_origen=None, clave=None):
     if motivo == Motivo.OTRO and not nota.strip():
         raise MotivoRequerido("El motivo 'Otro' exige una nota")
     return Operacion.objects.create(
@@ -224,14 +225,70 @@ def _crear_operacion(inquilino, tipo, *, motivo="", nota="", autorizado_por="",
         autorizado_por=autorizado_por,
         punto_venta=punto_venta,
         operacion_origen=operacion_origen,
+        # La restricción única (inquilino, clave) es la que de verdad impide
+        # el doble cobro: si dos peticiones iguales llegan a la vez, la
+        # segunda choca aquí y su transacción se deshace completa.
+        clave_idempotencia=clave or None,
     )
+
+
+class OperacionRepetida(ErrorSaldo):
+    """La misma petición ya se aplicó: se devuelve la operación original."""
+
+    def __init__(self, operacion):
+        super().__init__(f"Ya se aplicó como {operacion.folio}")
+        self.operacion = operacion
+
+
+class RetencionRepetida(ErrorSaldo):
+    """La misma corrección ya creó una retención."""
+
+    def __init__(self, retencion):
+        super().__init__("Esta corrección ya se aplicó")
+        self.retencion = retencion
+
+
+def operacion_por_clave(inquilino, clave):
+    """La operación que ya se hizo con esa llave de idempotencia, o None."""
+    if not clave:
+        return None
+    return Operacion.objects.filter(inquilino=inquilino, clave_idempotencia=clave).first()
+
+
+def _ya_aplicada(inquilino, clave):
+    """Si la llave ya se usó, corta antes de mover un centavo."""
+    previa = operacion_por_clave(inquilino, clave)
+    if previa is not None:
+        raise OperacionRepetida(previa)
+
+
+def _proporcion(titular, contraparte, tipos):
+    """
+    Cuánto pagó de verdad el titular por cada peso que tiene de esa
+    contraparte, según sus propios asientos: (acreditado_neto, pagado_neto).
+
+    Sirve para revertir el margen con el porcentaje con que se OTORGÓ y no
+    con el que hoy tenga configurado. Si el margen cambió de 4% a 6% entre
+    traspasos, el promedio ponderado de lo que de verdad pasó es la única
+    cifra correcta; usar el 6% actual devolvería de más.
+    """
+    from django.db.models import Sum as _Sum
+
+    ops = Operacion.objects.filter(
+        tipo__in=tipos, asientos__bolsa=titular
+    ).filter(asientos__bolsa=contraparte).values("pk")
+    acreditado = Asiento.objects.filter(operacion__in=ops, bolsa=titular).aggregate(
+        t=_Sum("monto"))["t"] or CERO
+    pagado = -(Asiento.objects.filter(operacion__in=ops, bolsa=contraparte).aggregate(
+        t=_Sum("monto"))["t"] or CERO)
+    return q(acreditado), q(pagado)
 
 
 # --------------------------------------------------------------------------
 # Fondeo y traspaso
 # --------------------------------------------------------------------------
 @transaction.atomic
-def fondear_administrador(administrador, monto, *, autorizado_por=""):
+def fondear_administrador(administrador, monto, *, autorizado_por="", clave=None):
     """
     El Super Admin pone saldo en la bolsa de un administrador.
 
@@ -244,18 +301,27 @@ def fondear_administrador(administrador, monto, *, autorizado_por=""):
     if monto <= CERO:
         raise OperacionNoPermitida("El monto a fondear debe ser positivo")
 
-    retenciones = _bloquear_retenciones(administrador)
     inquilino = administrador.inquilino
+    _ya_aplicada(inquilino, clave)
+    retenciones = _bloquear_retenciones(administrador)
+    # Margen del administrador: paga `monto` y recibe monto × (1 + margen).
+    # La diferencia sale de la cuenta de bonificación de EPS, igual que el
+    # margen del cliente (decisión 8).
+    factor = Decimal(1) + Decimal(administrador.margen_pct) / Decimal(100)
+    acreditado = q(monto * factor)
+    bonificacion = q(acreditado - monto)
     operacion = _crear_operacion(
-        inquilino, TipoOperacion.COMPRA, autorizado_por=autorizado_por
+        inquilino, TipoOperacion.COMPRA, autorizado_por=autorizado_por, clave=clave,
     )
-    _asentar(
-        operacion,
-        [
-            (bolsa_sistema(inquilino, ClaveSistema.FONDEO), -monto),
-            (bolsa_de(administrador), monto),
-        ],
-    )
+    movimientos = [
+        (bolsa_sistema(inquilino, ClaveSistema.FONDEO), -monto),
+        (bolsa_de(administrador), acreditado),
+    ]
+    if bonificacion != CERO:
+        movimientos.append(
+            (bolsa_sistema(inquilino, ClaveSistema.BONIFICACION_MARGEN), -bonificacion)
+        )
+    _asentar(operacion, movimientos)
     operacion.liquidaciones = _liquidar(
         administrador, retenciones, autorizado_por=autorizado_por
     )
@@ -263,7 +329,7 @@ def fondear_administrador(administrador, monto, *, autorizado_por=""):
 
 
 @transaction.atomic
-def fondear_cliente(cliente, monto, *, autorizado_por=""):
+def fondear_cliente(cliente, monto, *, autorizado_por="", clave=None):
     """
     El Super Admin pone saldo directo en la bolsa de un cliente.
 
@@ -277,10 +343,11 @@ def fondear_cliente(cliente, monto, *, autorizado_por=""):
     if monto <= CERO:
         raise OperacionNoPermitida("El monto a asignar debe ser positivo")
 
-    retenciones = _bloquear_retenciones(cliente)
     inquilino = cliente.inquilino
+    _ya_aplicada(inquilino, clave)
+    retenciones = _bloquear_retenciones(cliente)
     operacion = _crear_operacion(
-        inquilino, TipoOperacion.COMPRA, autorizado_por=autorizado_por
+        inquilino, TipoOperacion.COMPRA, autorizado_por=autorizado_por, clave=clave,
     )
     _asentar(
         operacion,
@@ -306,7 +373,8 @@ def _desglose_margen(cliente, monto_pagado):
 
 
 @transaction.atomic
-def traspasar_a_cliente(administrador, cliente, monto_pagado, *, autorizado_por=""):
+def traspasar_a_cliente(administrador, cliente, monto_pagado, *, autorizado_por="",
+                        clave=None):
     """
     Carga de bolsa del administrador hacia un cliente, con su margen.
 
@@ -323,11 +391,13 @@ def traspasar_a_cliente(administrador, cliente, monto_pagado, *, autorizado_por=
     if not cliente.puede_operar:
         raise OperacionNoPermitida(f"{cliente.motivo_no_opera}: no puede recibir saldo")
 
-    retenciones = _bloquear_retenciones(cliente)
     inquilino = administrador.inquilino
+    _ya_aplicada(inquilino, clave)
+    retenciones = _bloquear_retenciones(cliente)
     bolsa_admin = bolsa_de(administrador)
     bolsa_cliente = bolsa_de(cliente)
-    bloqueadas = _bloquear([bolsa_admin, bolsa_cliente])
+    bonif = bolsa_sistema(inquilino, ClaveSistema.BONIFICACION_MARGEN)
+    bloqueadas = _bloquear([bolsa_admin, bolsa_cliente, bonif])
     bolsa_admin = bloqueadas[bolsa_admin.pk]
     if q(bolsa_admin.disponible) < pagado:
         raise SaldoInsuficiente(
@@ -335,7 +405,7 @@ def traspasar_a_cliente(administrador, cliente, monto_pagado, *, autorizado_por=
         )
 
     operacion = _crear_operacion(
-        inquilino, TipoOperacion.TRASPASO, autorizado_por=autorizado_por
+        inquilino, TipoOperacion.TRASPASO, autorizado_por=autorizado_por, clave=clave,
     )
     movimientos = [(bolsa_admin, -pagado), (bolsa_cliente, acreditado)]
     if bonificacion != CERO:
@@ -383,7 +453,7 @@ def disponible_para_retirar(cliente, bolsa=None):
 
 
 @transaction.atomic
-def asignar_limite(punto_venta, nuevo_limite, *, autorizado_por=""):
+def asignar_limite(punto_venta, nuevo_limite, *, autorizado_por="", motivo="", nota=""):
     """
     Fija el techo de gasto de una caja. Reemplaza el valor anterior.
 
@@ -414,11 +484,58 @@ def asignar_limite(punto_venta, nuevo_limite, *, autorizado_por=""):
     )
     if nuevo_limite < fila.reservado:
         raise LimiteExcedido(
-            f"Hay {fila.reservado} reservado en ventas en vuelo en esa caja"
+            f"Hay {pesos(fila.reservado)} apartado en ventas en vuelo en esa caja: "
+            f"el límite no puede quedar debajo de eso"
         )
+    anterior = fila.limite
+    if anterior == nuevo_limite:
+        return fila
+    if nuevo_limite < anterior and not motivo:
+        # Bajar el límite es un retiro de saldo de la caja: lleva motivo,
+        # igual que cualquier otro retiro.
+        raise MotivoRequerido("Retirar saldo de una caja lleva motivo")
+    if motivo == Motivo.OTRO and not (nota or "").strip():
+        raise MotivoRequerido("El motivo 'Otro' exige una nota")
     fila.limite = nuevo_limite
     fila.save(update_fields=["limite", "actualizado"])
+    MovimientoLimite.objects.create(
+        inquilino=punto_venta.inquilino, punto_venta=punto_venta,
+        anterior=anterior, nuevo=nuevo_limite, motivo=motivo, nota=nota[:500],
+        autorizado_por=autorizado_por,
+    )
     return fila
+
+
+@transaction.atomic
+def retirar_de_caja(punto_venta, monto, *, motivo, nota="", autorizado_por=""):
+    """
+    El cliente le quita saldo a una de sus cajas: baja su límite en `monto`.
+    El dinero nunca salió de la bolsa del cliente (decisión 7), así que solo
+    vuelve a estar libre para asignarlo a otra caja o devolverlo.
+
+    Solo se retira lo que la caja no tiene apartado en ventas en vuelo.
+    """
+    monto = q(monto)
+    if monto <= CERO:
+        raise OperacionNoPermitida("El monto a retirar debe ser positivo")
+    if not motivo:
+        raise MotivoRequerido("Todo retiro lleva motivo")
+    # Mismo orden de candados que asignar_limite: bolsa del cliente y luego
+    # la fila de la caja.
+    Bolsa.objects.select_for_update().get(pk=bolsa_de(punto_venta.cliente).pk)
+    fila = BolsaPuntoVenta.objects.select_for_update().filter(punto_venta=punto_venta).first()
+    if fila is None or fila.limite <= CERO:
+        raise SaldoInsuficiente(f"{punto_venta.nombre} no tiene saldo asignado")
+    retirable = q(fila.limite - fila.reservado)
+    if monto > retirable:
+        raise SaldoInsuficiente(
+            f"{punto_venta.nombre} tiene {pesos(retirable)} retirables"
+            + (f" ({pesos(fila.reservado)} están en ventas en vuelo)" if fila.reservado else "")
+        )
+    return asignar_limite(
+        punto_venta, q(fila.limite - monto), autorizado_por=autorizado_por,
+        motivo=motivo, nota=nota,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -426,14 +543,22 @@ def asignar_limite(punto_venta, nuevo_limite, *, autorizado_por=""):
 # --------------------------------------------------------------------------
 @transaction.atomic
 def devolver(cliente, monto_acreditado, *, motivo, nota="", autorizado_por="",
-             operacion_origen=None):
+             operacion_origen=None, clave=None):
     """
-    Revierte un traspaso, total o parcialmente.
+    Revierte un traspaso, total o parcialmente: saldo del cliente de vuelta
+    a su administrador.
 
-    El margen se revierte en la misma proporción en que se otorgó: si se
-    acreditó 1,040 por un pago de 1,000, devolver los 1,040 regresa 1,000 al
-    administrador y 40 a la bonificación. Devolver la mitad regresa la mitad
-    de cada cosa.
+    Tres reglas que la hacen segura:
+
+    1. **Se bloquea antes de verificar.** Todas las bolsas que toca, en
+       orden de llave, antes de leer cuánto hay. Dos retiros simultáneos no
+       pueden pasar ambos la verificación.
+    2. **Solo regresa lo que vino del administrador.** Si el Super Admin le
+       abonó directo al cliente, ese dinero no es del administrador y no se
+       le puede "devolver" a él: se retira hacia EPS.
+    3. **El margen se revierte con el que se otorgó**, no con el que hoy
+       tenga configurado (ver `_proporcion`). Con un `operacion_origen` de
+       traspaso, se usa la proporción exacta de ese traspaso.
     """
     monto = q(monto_acreditado)
     if monto <= CERO:
@@ -441,18 +566,39 @@ def devolver(cliente, monto_acreditado, *, motivo, nota="", autorizado_por="",
     if not motivo:
         raise MotivoRequerido("Toda devolución lleva motivo")
 
-    disponible = disponible_para_retirar(cliente)
+    inquilino = cliente.inquilino
+    _ya_aplicada(inquilino, clave)
+    b_cliente = bolsa_de(cliente)
+    b_admin = bolsa_de(cliente.administrador)
+    b_bonif = bolsa_sistema(inquilino, ClaveSistema.BONIFICACION_MARGEN)
+    bloqueadas = _bloquear([b_cliente, b_admin, b_bonif])
+
+    disponible = disponible_para_retirar(cliente, bolsa=bloqueadas[b_cliente.pk])
     if monto > disponible:
         raise SaldoInsuficiente(
-            f"Solo hay {disponible} retirable: el resto está en límites de cajas "
+            f"Solo hay {pesos(disponible)} retirable: el resto está asignado a cajas "
             f"o en ventas sin cerrar"
         )
 
-    factor = Decimal(1) + cliente.margen_pct / Decimal(100)
-    pagado = q(monto / factor)
+    acreditado, pagado_total = _proporcion(
+        b_cliente, b_admin, [TipoOperacion.TRASPASO, TipoOperacion.DEVOLUCION]
+    )
+    if monto > acreditado:
+        raise SaldoInsuficiente(
+            f"De su administrador solo ha recibido {pesos(max(acreditado, CERO))} netos: "
+            f"lo demás se lo abonó EPS y se retira hacia EPS"
+        )
+
+    if operacion_origen is not None and operacion_origen.tipo == TipoOperacion.TRASPASO:
+        a = operacion_origen.asientos.filter(bolsa=b_cliente).first()
+        p = operacion_origen.asientos.filter(bolsa=b_admin).first()
+        if a and p and a.monto > 0:
+            acreditado, pagado_total = q(a.monto), q(-p.monto)
+
+    pagado = q(monto * pagado_total / acreditado) if acreditado > 0 else monto
+    pagado = min(pagado, monto)
     bonificacion = q(monto - pagado)
 
-    inquilino = cliente.inquilino
     operacion = _crear_operacion(
         inquilino,
         TipoOperacion.DEVOLUCION,
@@ -460,22 +606,18 @@ def devolver(cliente, monto_acreditado, *, motivo, nota="", autorizado_por="",
         nota=nota,
         autorizado_por=autorizado_por,
         operacion_origen=operacion_origen,
+        clave=clave,
     )
-    movimientos = [
-        (bolsa_de(cliente), -monto),
-        (bolsa_de(cliente.administrador), pagado),
-    ]
+    movimientos = [(b_cliente, -monto), (b_admin, pagado)]
     if bonificacion != CERO:
-        movimientos.append(
-            (bolsa_sistema(inquilino, ClaveSistema.BONIFICACION_MARGEN), bonificacion)
-        )
+        movimientos.append((b_bonif, bonificacion))
     _asentar(operacion, movimientos)
     return operacion
 
 
 @transaction.atomic
 def ajustar(cliente, monto, *, motivo, nota="", autorizado_por="", a_favor=False,
-            operacion_origen=None):
+            operacion_origen=None, clave=None):
     """
     Corrige una diferencia contra lo que debió aplicarse.
 
@@ -494,8 +636,14 @@ def ajustar(cliente, monto, *, motivo, nota="", autorizado_por="", a_favor=False
         raise MotivoRequerido("Todo ajuste lleva motivo")
 
     inquilino = cliente.inquilino
+    _ya_aplicada(inquilino, clave)
     bolsa_cliente = bolsa_de(cliente)
     bolsa_admin = bolsa_de(cliente.administrador)
+    bonif = bolsa_sistema(inquilino, ClaveSistema.BONIFICACION_MARGEN)
+    # Todo bloqueado antes de leer un solo saldo (ver devolver).
+    bloqueadas = _bloquear([bolsa_cliente, bolsa_admin, bonif])
+    bolsa_cliente = bloqueadas[bolsa_cliente.pk]
+    bolsa_admin = bloqueadas[bolsa_admin.pk]
 
     if a_favor:
         tope = q(settings.TAE["AJUSTE_FAVOR_TOPE"])
@@ -510,15 +658,12 @@ def ajustar(cliente, monto, *, motivo, nota="", autorizado_por="", a_favor=False
             )
         movimientos = [(bolsa_admin, -monto), (bolsa_cliente, monto)]
     else:
-        disponible = disponible_para_retirar(cliente)
+        disponible = disponible_para_retirar(cliente, bolsa=bolsa_cliente)
         if monto > disponible:
             raise SaldoInsuficiente(
-                f"Solo hay {disponible} retirable de la bolsa del cliente"
+                f"Solo hay {pesos(disponible)} retirable de la bolsa del cliente"
             )
-        movimientos = [
-            (bolsa_cliente, -monto),
-            (bolsa_sistema(inquilino, ClaveSistema.BONIFICACION_MARGEN), monto),
-        ]
+        movimientos = [(bolsa_cliente, -monto), (bonif, monto)]
 
     operacion = _crear_operacion(
         inquilino,
@@ -527,6 +672,7 @@ def ajustar(cliente, monto, *, motivo, nota="", autorizado_por="", a_favor=False
         nota=nota,
         autorizado_por=autorizado_por,
         operacion_origen=operacion_origen,
+        clave=clave,
     )
     _asentar(operacion, movimientos)
     return operacion
@@ -624,10 +770,14 @@ def _bloquear_retenciones(*entidades):
 
 
 def _bolsa_bloqueada_y_fondeo(titular):
-    """La bolsa del titular y la cuenta de fondeo, bloqueadas en orden de pk."""
+    """
+    La bolsa del titular y las dos cuentas de EPS (fondeo y bonificación),
+    bloqueadas juntas en orden de pk antes de leer nada.
+    """
     propia = bolsa_de(titular)
     fondeo = bolsa_sistema(titular.inquilino, ClaveSistema.FONDEO)
-    bloqueadas = _bloquear([propia, fondeo])
+    bonif = bolsa_sistema(titular.inquilino, ClaveSistema.BONIFICACION_MARGEN)
+    bloqueadas = _bloquear([propia, fondeo, bonif])
     return bloqueadas[propia.pk], bloqueadas[fondeo.pk]
 
 
@@ -638,21 +788,40 @@ def _retirable_bloqueado(titular, bolsa):
 
 
 def _asentar_retiro(titular, bolsa, fondeo, monto, *, motivo, nota, autorizado_por,
-                    operacion_origen=None, retencion=None):
+                    operacion_origen=None, retencion=None, clave=None):
+    """
+    Regresa `monto` a EPS. Si el titular es un administrador con margen, lo
+    que fue bonificación vuelve a la cuenta de bonificación y lo que pagó a
+    la de fondeo, en la proporción en que de verdad lo recibió. Así un
+    retiro es el inverso exacto de sus fondeos.
+    """
     operacion = _crear_operacion(
         titular.inquilino, TipoOperacion.RETIRO, motivo=motivo, nota=nota,
-        autorizado_por=autorizado_por, operacion_origen=operacion_origen,
+        autorizado_por=autorizado_por, operacion_origen=operacion_origen, clave=clave,
     )
     if retencion is not None:
         operacion.retencion = retencion
         operacion.save(update_fields=["retencion"])
-    _asentar(operacion, [(bolsa, -monto), (fondeo, monto)])
+    movimientos = [(bolsa, -monto)]
+    a_bonificacion = CERO
+    if isinstance(titular, Administrador):
+        acreditado, pagado = _proporcion(
+            bolsa, fondeo, [TipoOperacion.COMPRA, TipoOperacion.RETIRO]
+        )
+        if acreditado > 0 and pagado < acreditado:
+            a_bonificacion = q(monto - q(monto * pagado / acreditado))
+    movimientos.append((fondeo, q(monto - a_bonificacion)))
+    if a_bonificacion != CERO:
+        movimientos.append(
+            (bolsa_sistema(titular.inquilino, ClaveSistema.BONIFICACION_MARGEN), a_bonificacion)
+        )
+    _asentar(operacion, movimientos)
     return operacion
 
 
 @transaction.atomic
 def retirar_a_eps(titular, monto, *, motivo, nota="", autorizado_por="",
-                  operacion_origen=None):
+                  operacion_origen=None, clave=None):
     """
     El Super Admin regresa saldo de un administrador o de un cliente a la
     cuenta de fondeo de EPS. Es el inverso exacto de un fondeo.
@@ -667,6 +836,7 @@ def retirar_a_eps(titular, monto, *, motivo, nota="", autorizado_por="",
     if not motivo:
         raise MotivoRequerido("Todo retiro lleva motivo")
 
+    _ya_aplicada(titular.inquilino, clave)
     bolsa, fondeo = _bolsa_bloqueada_y_fondeo(titular)
     disponible = _retirable_bloqueado(titular, bolsa)
     if monto > disponible:
@@ -675,13 +845,13 @@ def retirar_a_eps(titular, monto, *, motivo, nota="", autorizado_por="",
         )
     return _asentar_retiro(
         titular, bolsa, fondeo, monto, motivo=motivo, nota=nota,
-        autorizado_por=autorizado_por, operacion_origen=operacion_origen,
+        autorizado_por=autorizado_por, operacion_origen=operacion_origen, clave=clave,
     )
 
 
 @transaction.atomic
 def corregir_fondeo(titular, monto, *, motivo=Motivo.FONDEO_EXCEDENTE, nota="",
-                    autorizado_por="", operacion_origen=None):
+                    autorizado_por="", operacion_origen=None, clave=None):
     """
     Corrige un fondeo de más, aunque el dinero ya haya bajado por la cadena.
 
@@ -700,6 +870,13 @@ def corregir_fondeo(titular, monto, *, motivo=Motivo.FONDEO_EXCEDENTE, nota="",
     if motivo == Motivo.OTRO and not nota.strip():
         raise MotivoRequerido("El motivo 'Otro' exige una nota")
 
+    _ya_aplicada(titular.inquilino, clave)
+    if clave:
+        previa = Retencion.objects.filter(
+            inquilino=titular.inquilino, clave_idempotencia=clave
+        ).first()
+        if previa is not None:
+            raise RetencionRepetida(previa)
     bolsa, fondeo = _bolsa_bloqueada_y_fondeo(titular)
     directo = min(_retirable_bloqueado(titular, bolsa), monto)
     faltante = q(monto - directo)
@@ -716,6 +893,7 @@ def corregir_fondeo(titular, monto, *, motivo=Motivo.FONDEO_EXCEDENTE, nota="",
             nota=nota,
             autorizado_por=autorizado_por,
             operacion_origen=operacion_origen,
+            clave_idempotencia=clave or None,
         )
 
     operacion = None
@@ -723,7 +901,7 @@ def corregir_fondeo(titular, monto, *, motivo=Motivo.FONDEO_EXCEDENTE, nota="",
         operacion = _asentar_retiro(
             titular, bolsa, fondeo, directo, motivo=motivo, nota=nota,
             autorizado_por=autorizado_por, operacion_origen=operacion_origen,
-            retencion=retencion,
+            retencion=retencion, clave=clave,
         )
     return directo, operacion, retencion
 
@@ -953,18 +1131,17 @@ def capturar(reserva):
 
     monto = q(reserva.monto)
     inquilino = reserva.inquilino
+    costo = bolsa_sistema(inquilino, ClaveSistema.COSTO_VENTA)
 
-    _asentar(
-        reserva.operacion,
-        [
-            (reserva.bolsa, -monto),
-            (bolsa_sistema(inquilino, ClaveSistema.COSTO_VENTA), monto),
-        ],
-    )
-
-    bolsa = Bolsa.objects.select_for_update().get(pk=reserva.bolsa_id)
+    # Primero se suelta lo apartado y después se cobra, con las dos bolsas
+    # ya bloqueadas en orden. Al revés, hay un instante en que el apartado
+    # supera al saldo y la base lo rechaza (bolsa_red_nunca_negativa).
+    bloqueadas = _bloquear([reserva.bolsa, costo])
+    bolsa = bloqueadas[reserva.bolsa_id]
     bolsa.reservado = q(bolsa.reservado - monto)
     bolsa.save(update_fields=["reservado", "actualizado"])
+
+    _asentar(reserva.operacion, [(bolsa, -monto), (costo, monto)])
 
     if reserva.bolsa_punto_venta_id:
         fila = BolsaPuntoVenta.objects.select_for_update().get(

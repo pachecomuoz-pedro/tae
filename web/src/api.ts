@@ -106,6 +106,28 @@ async function pedir<T>(ruta: string, opciones: RequestInit = {}): Promise<T> {
 
 const json = (cuerpo: unknown) => ({ method: "POST", body: JSON.stringify(cuerpo) });
 
+/**
+ * Llave de idempotencia: una por intención del usuario. La pantalla la crea
+ * al abrir el formulario y la reutiliza si el envío se repite (doble clic,
+ * red que reintenta). El servidor aplica la operación una sola vez y a la
+ * segunda contesta con el folio original.
+ */
+export const nuevaLlave = () =>
+  (globalThis.crypto && "randomUUID" in globalThis.crypto)
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+const conLlave = (cuerpo: unknown, llave?: string): RequestInit => ({
+  ...json(cuerpo),
+  headers: llave ? { "Idempotency-Key": llave } : {},
+});
+
+/** Construye la URL de una exportación CSV con los mismos filtros de la tabla. */
+export const urlExportar = (ruta: string, filtros: Record<string, string>) =>
+  "/api" + ruta + "?" + new URLSearchParams(
+    Object.entries(filtros).filter(([, v]) => v !== ""),
+  ).toString();
+
 // --- tipos que devuelve el servidor ---------------------------------------
 export interface Perfil {
   uuid: string;
@@ -156,6 +178,7 @@ export interface DosSaldos {
 
 export interface FilaRed extends DosSaldos {
   tipo: TipoRed;
+  margen_pct?: string;
   uuid: string;
   nombre: string;
   estado: string;
@@ -243,6 +266,61 @@ export interface RetiroEPS extends DosSaldos {
   retirado: string;
   folio: string | null;
   retencion: Retencion | null;
+  /** true si la misma petición ya se había aplicado: no se movió dinero otra vez. */
+  repetida?: boolean;
+  aviso?: string;
+}
+
+export interface Pagina<T> {
+  filas: T[];
+  pagina: number;
+  por_pagina: number;
+  total?: number;
+  hay_mas?: boolean;
+}
+
+/** Una venta, tal como la ve quien pregunta (los campos de arriba vienen en null). */
+export interface Transaccion {
+  folio: string;
+  fecha: string;
+  producto: string;
+  compania: string;
+  monto: string;
+  telefono: string;
+  estado: "aprobada" | "rechazada" | "sin_resolver" | "pendiente" | "duplicada";
+  estado_texto: string;
+  punto_venta: string;
+  cliente: string;
+  administrador: string | null;
+  autorizacion_carrier: string;
+  autorizacion_emida: string;
+  transaccion_emida: string;
+  saldo_despues: string | null;
+  response_code?: string;
+  h2h_result_code?: string;
+  mensaje?: string;
+  invoice_no?: string;
+  product_id?: string;
+  intentos?: number;
+  cerrado?: string | null;
+  pin?: string;
+}
+
+/** Un movimiento de saldo: asiento del ledger o cambio de límite de una caja. */
+export interface Movimiento {
+  fecha: string;
+  folio: string;
+  tipo: string;
+  concepto: string;
+  autorizado_por: string;
+  afectado: string;
+  nivel: string;
+  movimiento: "abono" | "cargo";
+  saldo_anterior: string;
+  monto: string;
+  saldo_actual: string;
+  motivo: string;
+  nota: string;
 }
 
 export interface ResultadoVenta {
@@ -296,7 +374,9 @@ export const api = {
 
   red: (tipo: TipoRed) => pedir<FilaRed[]>(`/red?tipo=${tipo}`),
 
-  altaAdministrador: (datos: { nombre: string; responsable: string; correo: string }) =>
+  altaAdministrador: (datos: {
+    nombre: string; responsable: string; correo: string; margen_pct?: string;
+  }) =>
     pedir<Alta>("/administradores/alta", json(datos)),
 
   altaCliente: (datos: {
@@ -307,21 +387,21 @@ export const api = {
     cliente?: string; nombre: string; direccion: string; correo: string; limite?: string;
   }) => pedir<Alta>("/puntos-venta/alta", json(datos)),
 
-  fondearAdministrador: (administrador: string, monto: string) =>
-    pedir<{ folio: string; saldo: string; liquidaciones: string[] } & DosSaldos>(
-      "/administradores/fondeo", json({ administrador, monto }),
+  fondearAdministrador: (administrador: string, monto: string, llave?: string) =>
+    pedir<{ folio: string; saldo: string; liquidaciones?: string[]; repetida?: boolean } & DosSaldos>(
+      "/administradores/fondeo", conLlave({ administrador, monto }, llave),
     ),
 
-  fondearCliente: (cliente: string, monto: string) =>
-    pedir<{ folio: string; saldo: string; liquidaciones: string[] } & DosSaldos>(
-      "/clientes/fondeo", json({ cliente, monto }),
+  fondearCliente: (cliente: string, monto: string, llave?: string) =>
+    pedir<{ folio: string; saldo: string; liquidaciones?: string[]; repetida?: boolean } & DosSaldos>(
+      "/clientes/fondeo", conLlave({ cliente, monto }, llave),
     ),
 
   /** Super Admin: regresa saldo a EPS. Con `retener_faltante`, el resto queda retenido en la red. */
   retirarAEPS: (datos: {
     tipo: "administrador" | "cliente"; uuid: string; monto: string; motivo: string;
     nota: string; retener_faltante: boolean; folio_origen?: string;
-  }) => pedir<RetiroEPS>("/retiros/eps", json(datos)),
+  }, llave?: string) => pedir<RetiroEPS>("/retiros/eps", conLlave(datos, llave)),
 
   retenciones: (todas = false) => pedir<Retencion[]>("/retenciones" + (todas ? "?todas=1" : "")),
 
@@ -364,27 +444,47 @@ export const api = {
 
   puntosVenta: () => pedir<PuntoVenta[]>("/puntos-venta"),
 
-  asignarLimite: (punto_venta: string, monto: string) =>
+  asignarLimite: (punto_venta: string, monto: string, motivo = "", nota = "") =>
     pedir<{ punto_venta: string; limite: string; suma_limites: string; retirable: string }>(
       "/puntos-venta/limite",
-      json({ punto_venta, monto }),
+      json({ punto_venta, monto, motivo, nota }),
     ),
+
+  /** El cliente le quita `monto` a una caja (baja su límite), con motivo. */
+  retirarDeCaja: (punto_venta: string, monto: string, motivo: string, nota = "") =>
+    pedir<{ punto_venta: string; limite: string; suma_limites: string; retirable: string }>(
+      "/puntos-venta/limite",
+      json({ punto_venta, monto, motivo, nota, retirar: true }),
+    ),
+
+  cambiarMargen: (tipo: "administrador" | "cliente", uuid: string, margen_pct: string) =>
+    pedir<{ nombre: string; margen_pct: string }>("/red/margen", json({ tipo, uuid, margen_pct })),
+
+  transacciones: (filtros: Record<string, string>) =>
+    pedir<Pagina<Transaccion>>("/transacciones?" + new URLSearchParams(filtros).toString()),
+
+  transaccion: (folio: string) =>
+    pedir<Transaccion>("/transacciones/" + encodeURIComponent(folio)),
+
+  movimientos: (filtros: Record<string, string>) =>
+    pedir<Pagina<Movimiento>>("/movimientos?" + new URLSearchParams(filtros).toString()),
 
   clientes: () => pedir<ClienteFila[]>("/clientes"),
 
-  traspasar: (cliente: string, monto: string, codigo_totp?: string) =>
-    pedir<{ folio: string; cliente: string; saldo_cliente: string }>(
+  traspasar: (cliente: string, monto: string, codigo_totp?: string, llave?: string) =>
+    pedir<{ folio: string; cliente: string; saldo_cliente: string; repetida?: boolean }>(
       "/traspasos",
-      json({ cliente, monto, codigo_totp }),
+      conLlave({ cliente, monto, codigo_totp }, llave),
     ),
 
   retirar: (
     cliente: string, monto: string, motivo: string,
-    tipo: "devolucion" | "ajuste", nota = "",
+    tipo: "devolucion" | "ajuste", nota = "", llave?: string,
   ) =>
-    pedir<{ folio: string; cliente: string; saldo_cliente: string; retirable: string }>(
+    pedir<{ folio: string; cliente: string; saldo_cliente: string; retirable: string;
+            repetida?: boolean }>(
       "/retiros",
-      json({ cliente, monto, motivo, tipo, nota }),
+      conLlave({ cliente, monto, motivo, tipo, nota }, llave),
     ),
 };
 

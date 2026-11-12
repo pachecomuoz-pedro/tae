@@ -4,6 +4,7 @@ Entidades de la jerarquía: inquilino, administrador, cliente, punto de venta.
 Este archivo solo define quién es quién. El dinero vive en apps.saldo.
 """
 import uuid
+from decimal import Decimal
 
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
@@ -63,6 +64,14 @@ class Administrador(EntidadBase):
     """Recibe saldo del Super Admin y lo reparte entre sus clientes."""
 
     responsable = models.CharField(max_length=160, blank=True)
+    # Bonificación que recibe al comprarle saldo a EPS: paga 1,000 y recibe
+    # 1,000 × (1 + margen). Igual que el del cliente (decisión 8), pero un
+    # nivel arriba. Puede ser cero. Cambiarlo no afecta lo ya fondeado: cada
+    # fondeo guarda en sus asientos cuánto pagó y cuánto recibió.
+    margen_pct = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0")), MaxValueValidator(Decimal("100"))],
+    )
     estado = models.CharField(
         max_length=12, choices=EstadoAdministrador.choices, default=EstadoAdministrador.ACTIVO
     )

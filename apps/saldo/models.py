@@ -20,7 +20,7 @@ from decimal import Decimal
 
 from django.core.validators import MinValueValidator
 from django.db import models
-from django.db.models import Q
+from django.db.models import F, Q
 
 from apps.core.models import Administrador, Cliente, Inquilino, PuntoVenta
 
@@ -99,6 +99,17 @@ class Bolsa(models.Model):
                 fields=["inquilino", "clave_sistema"],
                 name="bolsa_sistema_unica_por_inquilino",
             ),
+            # Última línea de defensa: aunque un error de código se colara, la
+            # base de datos rechaza una bolsa de la red en negativo o con más
+            # apartado que saldo. Las cuentas de sistema de EPS sí pueden ir
+            # en negativo: son la contrapartida de lo que EPS pone en la red.
+            models.CheckConstraint(
+                name="bolsa_red_nunca_negativa",
+                condition=(
+                    Q(tipo="sistema")
+                    | Q(saldo__gte=0, reservado__gte=0, reservado__lte=F("saldo"))
+                ),
+            ),
         ]
         indexes = [models.Index(fields=["inquilino", "tipo"])]
 
@@ -149,6 +160,12 @@ class BolsaPuntoVenta(models.Model):
 
     class Meta:
         db_table = "saldo_bolsa_punto_venta"
+        constraints = [
+            models.CheckConstraint(
+                name="limite_caja_nunca_negativo",
+                condition=Q(limite__gte=0, reservado__gte=0, reservado__lte=F("limite")),
+            ),
+        ]
 
     def __str__(self):
         return f"Límite {self.punto_venta.nombre}"
@@ -275,6 +292,11 @@ class Operacion(models.Model):
         "Retencion", null=True, blank=True, on_delete=models.PROTECT, related_name="operaciones"
     )
 
+    # Llave de idempotencia que manda la pantalla. Si la misma petición
+    # llega dos veces (doble clic, red que reintenta), la segunda encuentra
+    # esta operación y no mueve dinero otra vez.
+    clave_idempotencia = models.CharField(max_length=64, null=True, blank=True)
+
     # Lo que viaja al proveedor. Vacío en todo lo que no sea una venta.
     invoice_no = models.PositiveIntegerField(null=True, blank=True)
     invoice_ciclo = models.PositiveIntegerField(null=True, blank=True)
@@ -284,7 +306,10 @@ class Operacion(models.Model):
     class Meta:
         db_table = "saldo_operacion"
         constraints = [
-            models.UniqueConstraint(fields=["inquilino", "folio"], name="operacion_folio_unico")
+            models.UniqueConstraint(fields=["inquilino", "folio"], name="operacion_folio_unico"),
+            models.UniqueConstraint(
+                fields=["inquilino", "clave_idempotencia"], name="operacion_idempotente",
+            ),
         ]
         indexes = [
             models.Index(fields=["inquilino", "tipo", "creado"]),
@@ -426,10 +451,14 @@ class Retencion(models.Model):
     resuelto = models.DateTimeField(null=True, blank=True)
     resuelto_por = models.CharField(max_length=160, blank=True)
     nota_resolucion = models.CharField(max_length=500, blank=True)
+    clave_idempotencia = models.CharField(max_length=64, null=True, blank=True)
 
     class Meta:
         db_table = "saldo_retencion"
         constraints = [
+            models.UniqueConstraint(
+                fields=["inquilino", "clave_idempotencia"], name="retencion_idempotente",
+            ),
             models.CheckConstraint(
                 name="retencion_un_solo_titular",
                 condition=(
@@ -449,3 +478,34 @@ class Retencion(models.Model):
     @property
     def titular(self):
         return self.administrador or self.cliente
+
+
+class MovimientoLimite(models.Model):
+    """
+    Cada cambio al límite de una caja: asignación, retiro o recuperación.
+
+    El límite no mueve dinero (decisión 7), así que no deja asientos. Sin
+    esta tabla no habría forma de responder "¿quién le quitó saldo a mi caja
+    y cuándo?", que es justo lo que el cajero y el cliente necesitan ver en
+    su historial de traspasos.
+    """
+
+    uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    inquilino = models.ForeignKey(Inquilino, on_delete=models.PROTECT, related_name="+")
+    punto_venta = models.ForeignKey(
+        PuntoVenta, on_delete=models.PROTECT, related_name="movimientos_limite"
+    )
+    anterior = models.DecimalField(max_digits=18, decimal_places=4)
+    nuevo = models.DecimalField(max_digits=18, decimal_places=4)
+    motivo = models.CharField(max_length=20, blank=True)
+    nota = models.CharField(max_length=500, blank=True)
+    autorizado_por = models.CharField(max_length=160, blank=True)
+    creado = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "saldo_movimiento_limite"
+        indexes = [models.Index(fields=["punto_venta", "creado"])]
+
+    @property
+    def diferencia(self):
+        return self.nuevo - self.anterior

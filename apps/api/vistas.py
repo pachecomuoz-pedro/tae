@@ -23,6 +23,7 @@ from django.contrib.auth import login as django_login
 from django.contrib.auth import logout as django_logout
 from django.contrib.auth import update_session_auth_hash
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -50,6 +51,16 @@ def error(mensaje, codigo, *, clave=""):
     return Response({"error": str(mensaje), "clave": clave}, status=codigo)
 
 
+def clave_de(request):
+    """
+    La llave de idempotencia que manda la pantalla en `Idempotency-Key`.
+    Una por intención del usuario: la misma si reintenta, otra si hace una
+    operación nueva. Sin llave, la operación se hace igual (compatibilidad).
+    """
+    clave = (request.headers.get("Idempotency-Key") or "").strip()
+    return clave[:64] or None
+
+
 def manejar(fn):
     """
     Un solo lugar que convierte excepciones de negocio en códigos HTTP.
@@ -68,6 +79,33 @@ def manejar(fn):
             return error(e, status.HTTP_401_UNAUTHORIZED, clave="segundo_factor")
         except permisos.TopeDiarioExcedido as e:
             return error(e, status.HTTP_409_CONFLICT, clave="tope_diario")
+        except IntegrityError as e:
+            # Dos peticiones con la misma llave llegaron a la vez: la base
+            # dejó pasar solo una. Si la otra ya terminó, se contesta con su
+            # folio; si sigue en curso, se pide esperar.
+            if "idempotente" not in str(e):
+                raise
+            clave = clave_de(request)
+            previa = services.operacion_por_clave(request.user.inquilino, clave)
+            if previa is not None:
+                return Response({"folio": previa.folio, "repetida": True,
+                                 "aviso": f"Ya se había aplicado como {previa.folio}"})
+            return error("Esa misma operación se está procesando; espera un momento",
+                         status.HTTP_409_CONFLICT, clave="en_proceso")
+        except services.OperacionRepetida as e:
+            # La misma petición ya se aplicó (doble clic, reintento de red).
+            # No es un error: se contesta con el folio original y la pantalla
+            # muestra lo mismo que la primera vez, sin mover dinero.
+            return Response(
+                {"folio": e.operacion.folio, "repetida": True,
+                 "aviso": f"Ya se había aplicado como {e.operacion.folio}"},
+                status=status.HTTP_200_OK,
+            )
+        except services.RetencionRepetida as e:
+            return Response(
+                {"folio": None, "repetida": True, "aviso": "Esta corrección ya se había aplicado"},
+                status=status.HTTP_200_OK,
+            )
         except services.RedRetenida as e:
             # Antes que SaldoInsuficiente: es una subclase y la pantalla
             # tiene que decir algo distinto ("se libera con un fondeo").
@@ -448,7 +486,7 @@ def traspasar(request):
     cliente = _cliente_de(request)
     operacion = acciones.traspasar(
         request.user, cliente, request.data.get("monto", "0"),
-        codigo_totp=request.data.get("codigo_totp"),
+        codigo_totp=request.data.get("codigo_totp"), clave=clave_de(request),
     )
     bolsa = services.bolsa_de(cliente)
     return Response(
@@ -471,7 +509,7 @@ def retirar(request):
     if motivo not in Motivo.values:
         return error("Motivo fuera del catálogo", status.HTTP_400_BAD_REQUEST, clave="motivo")
 
-    comun = {"motivo": motivo, "nota": request.data.get("nota", "")}
+    comun = {"motivo": motivo, "nota": request.data.get("nota", ""), "clave": clave_de(request)}
     if request.data.get("tipo") == "ajuste":
         operacion = acciones.ajustar(
             request.user, cliente, request.data.get("monto", "0"),
@@ -504,9 +542,20 @@ def asignar_limite(request):
     if punto_venta is None:
         raise permisos.PermisoDenegado("Ese punto de venta no existe o no es tuyo")
 
-    fila = acciones.asignar_limite(
-        request.user, punto_venta, request.data.get("monto", "0")
-    )
+    motivo = request.data.get("motivo", "")
+    if motivo and motivo not in Motivo.values:
+        return error("Motivo fuera del catálogo", status.HTTP_400_BAD_REQUEST, clave="motivo")
+    if request.data.get("retirar"):
+        # Retiro explícito: baja el límite en `monto`.
+        fila = acciones.retirar_de_caja(
+            request.user, punto_venta, request.data.get("monto", "0"),
+            motivo=motivo, nota=request.data.get("nota", ""),
+        )
+    else:
+        fila = acciones.asignar_limite(
+            request.user, punto_venta, request.data.get("monto", "0"),
+            motivo=motivo, nota=request.data.get("nota", ""),
+        )
     cliente = punto_venta.cliente
     return Response({
         "punto_venta": punto_venta.nombre,

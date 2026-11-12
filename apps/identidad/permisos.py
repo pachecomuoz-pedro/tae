@@ -206,6 +206,23 @@ def puede_retirar_a_eps(usuario, titular):
         raise PermisoDenegado(f"{titular.nombre} es de otro inquilino")
 
 
+def puede_cambiar_margen(usuario, entidad):
+    """Administrador: solo el Super Admin. Cliente: el Super Admin o su administrador."""
+    from apps.core.models import Administrador, Cliente
+
+    if isinstance(entidad, Administrador):
+        if usuario.rol != Rol.SUPER_ADMIN or not usuario.alcanza_administrador(entidad):
+            raise PermisoDenegado("Solo el Super Admin cambia el margen de un administrador")
+        return
+    if isinstance(entidad, Cliente):
+        if usuario.rol not in (Rol.SUPER_ADMIN, Rol.ADMINISTRADOR):
+            raise PermisoDenegado("Solo el Super Admin o su administrador cambian su margen")
+        if not usuario.alcanza_cliente(entidad):
+            raise PermisoDenegado(f"{entidad.nombre} no está bajo tu alcance")
+        return
+    raise PermisoDenegado("Solo administradores y clientes tienen margen")
+
+
 def puede_cancelar_retencion(usuario, retencion):
     """Perdonar una retención es una decisión de dinero de EPS: solo el Super Admin."""
     if usuario.rol != Rol.SUPER_ADMIN:

@@ -270,7 +270,8 @@ class VentaPorHTTP(BaseAPI):
         self.assertEqual(services.bolsa_de(self.m.cliente).saldo, antes)
 
     def test_saldo_insuficiente_devuelve_402(self):
-        acciones.asignar_limite(self.m.usuario_cliente, self.m.pdv, D("50"))
+        acciones.asignar_limite(self.m.usuario_cliente, self.m.pdv, D("50"),
+                                motivo="captura")  # bajarlo es un retiro: lleva motivo
         r = self.como("luis@laermita.mx").post(
             "/api/venta",
             {"sku": "TEL-TAE-100", "cuenta": "9991234567"},

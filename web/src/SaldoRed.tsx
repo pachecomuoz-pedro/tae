@@ -17,7 +17,7 @@
  */
 import { useEffect, useState } from "react";
 
-import { ErrorAPI, FilaRed, Retencion, api, pesos } from "./api";
+import { ErrorAPI, FilaRed, Retencion, api, nuevaLlave, pesos } from "./api";
 import { Aviso, Campo, Tarjeta } from "./piezas";
 
 type Nivel = "administrador" | "cliente";
@@ -176,6 +176,7 @@ function Abonar({ fila, nivel, alHecho }: { fila: FilaRed; nivel: Nivel; alHecho
   const [error, setError] = useState<ErrorAPI | null>(null);
   const [hecho, setHecho] = useState("");
   const [enviando, setEnviando] = useState(false);
+  const [llave, setLlave] = useState(nuevaLlave);
   const retenido = Number(fila.retenido ?? 0);
   const n = Number(monto || 0);
 
@@ -185,12 +186,15 @@ function Abonar({ fila, nivel, alHecho }: { fila: FilaRed; nivel: Nivel; alHecho
     setHecho("");
     try {
       const r = nivel === "administrador"
-        ? await api.fondearAdministrador(fila.uuid, monto)
-        : await api.fondearCliente(fila.uuid, monto);
-      const liq = r.liquidaciones.length
+        ? await api.fondearAdministrador(fila.uuid, monto, llave)
+        : await api.fondearCliente(fila.uuid, monto, llave);
+      const liq = r.liquidaciones?.length
         ? ` Cubrió la retención con ${r.liquidaciones.join(", ")}.` : "";
-      setHecho(`Folio ${r.folio}.${liq}`);
+      setHecho(r.repetida
+        ? `Ya se había aplicado como ${r.folio}: no se volvió a abonar.`
+        : `Folio ${r.folio}.${liq}`);
       setMonto("");
+      setLlave(nuevaLlave());
       alHecho();
     } catch (e) {
       setError(e as ErrorAPI);
@@ -202,7 +206,7 @@ function Abonar({ fila, nivel, alHecho }: { fila: FilaRed; nivel: Nivel; alHecho
   return (
     <div className="mt-4 space-y-3">
       <Campo etiqueta="Monto a abonar" valor={monto} marcador="0.00" prueba="monto-abono"
-             alCambiar={(v) => setMonto(v.replace(/[^0-9.]/g, ""))} />
+             alCambiar={(v) => { setMonto(v.replace(/[^0-9.]/g, "")); setLlave(nuevaLlave()); }} />
       {retenido > 0 && n > 0 && (
         <p className="rounded-xl bg-ambar-fondo p-3 text-xs text-ambar-texto">
           Tiene {pesos(retenido)} retenidos. Este abono los cubre primero: le quedan
@@ -232,6 +236,7 @@ function Retirar({ fila, nivel, alHecho }: { fila: FilaRed; nivel: Nivel; alHech
   const [error, setError] = useState<ErrorAPI | null>(null);
   const [hecho, setHecho] = useState("");
   const [enviando, setEnviando] = useState(false);
+  const [llave, setLlave] = useState(nuevaLlave);
 
   const disponible = Number(fila.disponible ?? 0);
   const pedido = Number(monto || 0);
@@ -248,7 +253,13 @@ function Retirar({ fila, nivel, alHecho }: { fila: FilaRed; nivel: Nivel; alHech
       const r = await api.retirarAEPS({
         tipo: nivel, uuid: fila.uuid, monto, motivo, nota,
         retener_faltante: retener, folio_origen: folio || undefined,
-      });
+      }, llave);
+      setLlave(nuevaLlave());
+      if (r.repetida) {
+        setHecho(r.aviso || "Ya se había aplicado: no se retiró otra vez.");
+        alHecho();
+        return;
+      }
       const partes = [];
       if (r.folio) partes.push(`Se retiraron ${pesos(r.retirado)} (folio ${r.folio}).`);
       if (r.retencion) partes.push(`Quedan ${pesos(r.retencion.pendiente)} retenidos en su red.`);
@@ -266,7 +277,7 @@ function Retirar({ fila, nivel, alHecho }: { fila: FilaRed; nivel: Nivel; alHech
   return (
     <div className="mt-4 space-y-3">
       <Campo etiqueta="Monto a retirar" valor={monto} marcador="0.00" prueba="monto-retiro-eps"
-             alCambiar={(v) => setMonto(v.replace(/[^0-9.]/g, ""))} />
+             alCambiar={(v) => { setMonto(v.replace(/[^0-9.]/g, "")); setLlave(nuevaLlave()); }} />
       <label className="block">
         <span className="mb-1.5 block text-xs font-bold text-tinta-dos">Motivo · obligatorio</span>
         <select value={motivo} onChange={(e) => setMotivo(e.target.value)}

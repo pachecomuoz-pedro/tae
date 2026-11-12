@@ -13,6 +13,7 @@ import { ErrorAPI, Perfil, Saldo, api, pesos } from "./api";
 import { PuntosVenta } from "./Cliente";
 import { Exposicion } from "./Exposicion";
 import { Aprobaciones, CambiarContrasena, Red } from "./Red";
+import { Movimientos, Transacciones } from "./Reportes";
 import { SaldoRed } from "./SaldoRed";
 import { Venta } from "./Venta";
 
@@ -29,12 +30,21 @@ function pantallasDe(perfil: Perfil): Pantalla[] {
   // Un menú por rol, igual en todas sus pantallas (decisión 21). Los
   // nombres siguen el canvas de diseño; solo aparecen las opciones que ya
   // existen en el backend.
-  if (perfil.capacidades.vender) return [{ clave: "venta", titulo: "Venta de tiempo aire" }];
+  // Transacciones y Movimientos van en todos los menús: cada quien ve ahí lo
+  // suyo y lo de abajo, y el servidor decide qué filas y columnas recibe.
+  const reportes = [
+    { clave: "transacciones", titulo: "Transacciones" },
+    { clave: "movimientos", titulo: "Movimientos de saldo" },
+  ];
+  if (perfil.capacidades.vender) {
+    return [{ clave: "venta", titulo: "Venta de tiempo aire" }, ...reportes];
+  }
   if (perfil.rol === "cliente") {
     return [
       { clave: "cajas", titulo: "Mis puntos de venta" },
       { clave: "aprobaciones", titulo: "Aprobaciones" },
       { clave: "red", titulo: "Cajeros" },
+      ...reportes,
     ];
   }
   if (perfil.rol === "super_admin") {
@@ -46,6 +56,7 @@ function pantallasDe(perfil: Perfil): Pantalla[] {
       // el traspaso del administrador: ese descuenta de la bolsa del
       // administrador, y desde aquí el dinero sale de (o vuelve a) EPS.
       { clave: "saldo_red", titulo: "Abonos y retiros" },
+      ...reportes,
     ];
   }
   return [
@@ -53,6 +64,7 @@ function pantallasDe(perfil: Perfil): Pantalla[] {
     { clave: "aprobaciones", titulo: "Aprobaciones" },
     { clave: "traspaso", titulo: "Traspaso de saldo" },
     { clave: "retiro", titulo: "Retiro de saldo" },
+    ...reportes,
   ];
 }
 
@@ -160,6 +172,8 @@ export function App() {
           )}
           {pantalla === "exposicion" && <Exposicion />}
           {pantalla === "saldo_red" && <SaldoRed alCambiar={refrescarSaldo} />}
+          {pantalla === "transacciones" && <Transacciones perfil={perfil} />}
+          {pantalla === "movimientos" && <Movimientos perfil={perfil} />}
           {pantalla === "red" && <Red perfil={perfil} alCambiar={refrescarSaldo} />}
           {pantalla === "aprobaciones" && <Aprobaciones alCambiar={refrescarSaldo} />}
         </main>

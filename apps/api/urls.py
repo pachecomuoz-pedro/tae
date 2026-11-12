@@ -7,7 +7,7 @@ vistas_red.py.
 """
 from django.urls import path
 
-from . import vistas, vistas_proveedor, vistas_red
+from . import vistas_reportes, vistas, vistas_proveedor, vistas_red
 
 urlpatterns = [
     # Sesión y contraseña
@@ -52,6 +52,12 @@ urlpatterns = [
     path("usuarios/restablecer", vistas_red.restablecer_usuario),
     path("usuarios/acceso", vistas_red.acceso),
     path("red/suspension", vistas_red.suspension),
+    path("red/margen", vistas_red.cambiar_margen),
+    path("transacciones", vistas_reportes.transacciones),
+    path("transacciones/exportar", vistas_reportes.exportar_transacciones),
+    path("transacciones/<str:folio>", vistas_reportes.transaccion),
+    path("movimientos", vistas_reportes.movimientos),
+    path("movimientos/exportar", vistas_reportes.exportar_movimientos),
 
     # Saldo de EPS en Emida (solo Super Admin)
     path("proveedor/saldo", vistas_proveedor.saldo_emida),

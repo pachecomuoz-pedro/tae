@@ -28,6 +28,7 @@ from apps.core.models import (
 )
 from apps.catalogo import servicios as catalogo
 from apps.saldo import services
+from apps.saldo.models import Motivo
 
 from . import contrasenas, permisos
 from .models import (
@@ -101,7 +102,7 @@ def _aprueba_quien_crea(usuario):
 # --------------------------------------------------------------------------
 @transaction.atomic
 def crear_administrador(usuario, *, nombre, responsable="", correo_responsable=None,
-                        password=None):
+                        password=None, margen_pct="0"):
     """
     Alta de un administrador. Siempre nace activo: solo lo crea el Super Admin.
 
@@ -110,7 +111,8 @@ def crear_administrador(usuario, *, nombre, responsable="", correo_responsable=N
     """
     permisos.puede_crear_administrador(usuario)
     administrador = Administrador.objects.create(
-        inquilino=usuario.inquilino, nombre=nombre, responsable=responsable
+        inquilino=usuario.inquilino, nombre=nombre, responsable=responsable,
+        margen_pct=_margen(margen_pct),
     )
     services.bolsa_de(administrador)  # la bolsa nace con la entidad, en cero
     administrador.credencial_temporal = None
@@ -152,7 +154,7 @@ def crear_cliente(usuario, *, administrador, nombre, rfc="", margen_pct="0",
         "administrador": administrador,
         "nombre": nombre,
         "rfc": rfc,
-        "margen_pct": Decimal(str(margen_pct)),
+        "margen_pct": _margen(margen_pct),
         "estado": EstadoCliente.APROBADO if aprobar else EstadoCliente.PENDIENTE,
     }
     if modo_bolsa:
@@ -279,7 +281,10 @@ def rechazar_punto_venta(usuario, punto_venta, *, motivo):
 
     fila = getattr(punto_venta, "limite", None)
     if fila is not None and fila.limite > 0:
-        services.asignar_limite(punto_venta, 0, autorizado_por=usuario.nombre)
+        services.asignar_limite(
+            punto_venta, 0, autorizado_por=usuario.nombre, motivo=Motivo.OTRO,
+            nota=f"Caja rechazada: se libera su límite ({motivo})"[:500],
+        )
 
     punto_venta.estado = EstadoPuntoVenta.RECHAZADO
     punto_venta.motivo_rechazo = motivo
@@ -291,21 +296,23 @@ def rechazar_punto_venta(usuario, punto_venta, *, motivo):
 # --------------------------------------------------------------------------
 # Saldo, con el permiso delante
 # --------------------------------------------------------------------------
-def fondear_administrador(usuario, administrador, monto):
-    """El Super Admin carga saldo a un administrador."""
+def fondear_administrador(usuario, administrador, monto, *, clave=None):
+    """El Super Admin carga saldo a un administrador (con su margen, si tiene)."""
     permisos.puede_fondear_administrador(usuario, administrador)
     return services.fondear_administrador(
-        administrador, monto, autorizado_por=usuario.nombre
+        administrador, monto, autorizado_por=usuario.nombre, clave=clave,
     )
 
 
-def fondear_cliente(usuario, cliente, monto):
+def fondear_cliente(usuario, cliente, monto, *, clave=None):
     """El Super Admin asigna saldo directo a un cliente. Ver services.fondear_cliente."""
     permisos.puede_fondear_cliente(usuario, cliente)
-    return services.fondear_cliente(cliente, monto, autorizado_por=usuario.nombre)
+    return services.fondear_cliente(
+        cliente, monto, autorizado_por=usuario.nombre, clave=clave,
+    )
 
 
-def traspasar(usuario, cliente, monto_pagado, *, codigo_totp=None):
+def traspasar(usuario, cliente, monto_pagado, *, codigo_totp=None, clave=None):
     """
     El traspaso de un administrador a un cliente.
 
@@ -318,34 +325,76 @@ def traspasar(usuario, cliente, monto_pagado, *, codigo_totp=None):
         usuario, cliente, monto_pagado, totp_verificado=verificado
     )
     return services.traspasar_a_cliente(
-        cliente.administrador, cliente, monto_pagado, autorizado_por=usuario.nombre
+        cliente.administrador, cliente, monto_pagado, autorizado_por=usuario.nombre,
+        clave=clave,
     )
 
 
-def devolver(usuario, cliente, monto_acreditado, *, motivo, nota=""):
+def devolver(usuario, cliente, monto_acreditado, *, motivo, nota="", clave=None):
     """Devuelve saldo de un cliente al administrador. Exige motivo del catálogo."""
     permisos.puede_retirar(usuario, cliente)
     return services.devolver(
         cliente, monto_acreditado, motivo=motivo, nota=nota,
-        autorizado_por=usuario.nombre,
+        autorizado_por=usuario.nombre, clave=clave,
     )
 
 
-def ajustar(usuario, cliente, monto, *, motivo, nota="", a_favor=False):
+def ajustar(usuario, cliente, monto, *, motivo, nota="", a_favor=False, clave=None):
     """Corrige el saldo de un cliente con motivo. A favor tiene tope (TAE_AJUSTE_FAVOR_TOPE)."""
     permisos.puede_retirar(usuario, cliente)
     return services.ajustar(
         cliente, monto, motivo=motivo, nota=nota, a_favor=a_favor,
-        autorizado_por=usuario.nombre,
+        autorizado_por=usuario.nombre, clave=clave,
     )
 
 
-def asignar_limite(usuario, punto_venta, monto):
-    """Fija el límite de una caja, con el permiso verificado antes."""
+def asignar_limite(usuario, punto_venta, monto, *, motivo="", nota=""):
+    """
+    Fija el límite de una caja, con el permiso verificado antes. Bajarlo es
+    un retiro y exige motivo (ver services.asignar_limite).
+    """
     permisos.puede_asignar_limite(usuario, punto_venta)
     return services.asignar_limite(
-        punto_venta, monto, autorizado_por=usuario.nombre
+        punto_venta, monto, autorizado_por=usuario.nombre, motivo=motivo, nota=nota,
     )
+
+
+def retirar_de_caja(usuario, punto_venta, monto, *, motivo, nota=""):
+    """El cliente (o quien esté arriba) le quita saldo a una caja, con motivo."""
+    permisos.puede_asignar_limite(usuario, punto_venta)
+    return services.retirar_de_caja(
+        punto_venta, monto, motivo=motivo, nota=nota, autorizado_por=usuario.nombre,
+    )
+
+
+def _margen(valor):
+    """Un margen válido: número entre 0 y 100, con dos decimales."""
+    try:
+        m = Decimal(str(valor if valor not in (None, "") else "0")).quantize(Decimal("0.01"))
+    except Exception:
+        raise permisos.PermisoDenegado("El margen debe ser un número") from None
+    if m < 0 or m > 100:
+        raise permisos.PermisoDenegado("El margen va de 0% a 100%")
+    return m
+
+
+@transaction.atomic
+def cambiar_margen(usuario, entidad, margen_pct):
+    """
+    Cambia el margen de un administrador o un cliente. Aplica a los fondeos
+    y traspasos que vengan; los anteriores conservan el suyo en sus asientos
+    y por eso una devolución revierte siempre con el margen que se otorgó.
+
+    El margen de un administrador lo cambia el Super Admin; el de un
+    cliente, el Super Admin o su administrador.
+    """
+    permisos.puede_cambiar_margen(usuario, entidad)
+    anterior = entidad.margen_pct
+    entidad.margen_pct = _margen(margen_pct)
+    entidad.save(update_fields=["margen_pct"])
+    registrar(usuario, AccionAdministrativa.CAMBIO_MARGEN, entidad,
+              detalle=f"{anterior}% → {entidad.margen_pct}%")
+    return entidad
 
 
 @transaction.atomic
@@ -371,7 +420,7 @@ def reactivar_cliente(usuario, cliente):
 # --------------------------------------------------------------------------
 @transaction.atomic
 def retirar_a_eps(usuario, titular, monto, *, motivo, nota="", retener_faltante=False,
-                  operacion_origen=None):
+                  operacion_origen=None, clave=None):
     """
     El Super Admin regresa saldo de un administrador o un cliente a EPS.
 
@@ -385,12 +434,12 @@ def retirar_a_eps(usuario, titular, monto, *, motivo, nota="", retener_faltante=
     if retener_faltante:
         retirado, operacion, retencion = services.corregir_fondeo(
             titular, monto, motivo=motivo, nota=nota, autorizado_por=usuario.nombre,
-            operacion_origen=operacion_origen,
+            operacion_origen=operacion_origen, clave=clave,
         )
     else:
         operacion = services.retirar_a_eps(
             titular, monto, motivo=motivo, nota=nota, autorizado_por=usuario.nombre,
-            operacion_origen=operacion_origen,
+            operacion_origen=operacion_origen, clave=clave,
         )
         retirado, retencion = services.q(monto), None
 

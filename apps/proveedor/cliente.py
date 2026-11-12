@@ -173,6 +173,8 @@ class Respuesta:
     aprobada: bool
     transaction_id: str = ""
     control_no: str = ""
+    carrier_control_no: str = ""
+    pin: str = ""
     response_code: str = ""
     h2h_result_code: str = ""
     mensaje: str = ""
@@ -197,6 +199,10 @@ class Respuesta:
             aprobada=aprobada(metodo, cuerpo),
             transaction_id=str(cuerpo.get("transactionId") or ""),
             control_no=str(cuerpo.get("controlNo") or ""),
+            carrier_control_no=str(
+                cuerpo.get("carrierControlNo") or cuerpo.get("carrierControlNumber") or ""
+            ),
+            pin=str(cuerpo.get("pin") or cuerpo.get("PIN") or ""),
             response_code=str(cuerpo.get("responseCode") or ""),
             h2h_result_code=str(cuerpo.get("h2hResultCode") or ""),
             mensaje=str(

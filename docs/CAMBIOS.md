@@ -133,3 +133,37 @@ Aditivas: los administradores existentes quedan `activo`.
 
 ### Pruebas
 290, todas pasan (eran 242).
+
+
+---
+
+## Séptima entrega: retiros blindados, reportes y margen dinámico
+
+Decisiones 28, 29 y 30.
+
+### Retiros a prueba de balas
+- Bloqueo de todas las bolsas antes de leer saldos en devoluciones, ajustes, retiros a EPS y traspasos.
+- Restricciones en la base: ninguna bolsa de la red ni límite de caja en negativo.
+- Idempotencia (`Idempotency-Key`): un doble clic o un reintento no aplica dos veces. La pantalla avisa "ya se había aplicado" y muestra el folio original.
+- La devolución revierte el margen con el que se otorgó y solo devuelve al administrador lo que él traspasó.
+- Las bolsas se crean al dar de alta a su dueño. Una migración crea las que falten.
+- **Retiro de saldo de una caja** por el cliente (Mis puntos de venta → Retirar), con motivo. Bajar un límite siempre exige motivo y queda en el historial.
+
+### Transacciones y movimientos
+- Pantallas **Transacciones** (con detalle y Exportar) y **Movimientos de saldo** en el menú de todos los roles, con visibilidad por jerarquía.
+- Endpoints: `transacciones`, `transacciones/<folio>`, `transacciones/exportar`, `movimientos`, `movimientos/exportar`.
+- Se guardan la autorización del carrier (`carrierControlNo`), el `responseMessage` completo y el PIN.
+
+### Margen
+- Margen del administrador, aplicado al fondearlo.
+- Margen libre de 0 % a 100 % en el alta de administrador y cliente, y editable después (botón "Margen" en Usuarios de la red).
+
+### Migraciones
+- `core/0004_administrador_margen_pct`
+- `identidad/0005_accion_cambio_margen`
+- `proveedor/0003_autorizacion_carrier_mensaje_pin`
+- `saldo/0006_blindaje_retiros_e_historial_limites` (agrega restricciones: si una bolsa existente estuviera en negativo, la migración fallará y avisará; no debería pasar)
+- `saldo/0007_bolsas_desde_el_alta`
+
+### Pruebas
+321, todas pasan (eran 290).

@@ -35,6 +35,9 @@ Este documento explica **por qué** el sistema es como es. Cada decisión tiene 
 | 25 | Las tareas programadas viven en un contenedor, no en el crontab | Técnica |
 | 26 | Suspensión en cada nivel y acceso por persona | Negocio / seguridad |
 | 27 | Retiro a EPS y retención de red para fondeos de más | Dinero |
+| 28 | Retiros a prueba de balas | Dinero / técnica |
+| 29 | Transacciones y movimientos por jerarquía | Producto / seguridad |
+| 30 | Margen dinámico en administrador y cliente; la caja conserva su límite | Dinero |
 
 ---
 
@@ -311,6 +314,39 @@ El segundo factor se activa desde la terminal con `preparar_super_admin`. Reinic
 - Un retiro directo puede dejar una rama por debajo de su retención; en ese caso la rama se detiene hasta el siguiente fondeo, que es el comportamiento buscado.
 - Endpoints: `retiros/eps`, `retenciones` y `retenciones/cancelar`. Pantalla: "Abonos y retiros" del Super Admin.
 - Corrección relacionada: `disponible_para_retirar` restaba dos veces las ventas en vuelo de cajas con límite (el límite ya las incluye).
+
+## 28. Retiros a prueba de balas
+
+**Contexto.** Una revisión de todos los caminos que sacan dinero encontró cuatro huecos: `devolver` y `ajustar` verificaban el saldo antes de bloquear la bolsa; la base aceptaba saldos negativos; un doble clic podía aplicar un retiro dos veces; y la devolución revertía el margen con el porcentaje actual, no con el otorgado.
+
+**Decisión.**
+- **Bloquear antes de leer.** Toda operación de dinero bloquea, al inicio y en orden de llave (decisión 9), todas las bolsas que va a tocar, incluidas las cuentas de EPS. Después verifica y después asienta.
+- **La base como última defensa.** `bolsa_red_nunca_negativa`: una bolsa de administrador o cliente no puede tener saldo negativo ni más apartado que saldo. `limite_caja_nunca_negativo`: lo mismo para el límite de una caja. Las cuentas de sistema de EPS quedan fuera porque van en negativo por diseño.
+- **Idempotencia.** La pantalla manda `Idempotency-Key` con una llave por intención. `Operacion.clave_idempotencia` y `Retencion.clave_idempotencia` son únicas por inquilino: una petición repetida, aunque llegue al mismo tiempo que la original, no mueve dinero y recibe el folio original.
+- **El margen con que se otorgó.** La devolución usa la proporción real pagado/acreditado de los traspasos del cliente (promedio ponderado). Con `operacion_origen` usa la de ese traspaso. El retiro a EPS de un administrador con margen regresa la bonificación a su cuenta en la misma proporción.
+- **Lo que es de quién.** A un administrador solo se le devuelve lo que él traspasó neto. Lo que EPS abonó directo al cliente se retira hacia EPS.
+- **Bolsas desde el alta.** Toda bolsa se crea con su dueño (`saldo/senales.py`). Crearlas bajo carga en la primera operación provocaba bloqueos mutuos en MySQL.
+- **Retirar de una caja** es bajar su límite y exige motivo. Cada cambio queda en `MovimientoLimite`.
+
+**Consecuencias.** `capturar` suelta el apartado antes de cobrar, para no violar la restricción en el instante intermedio. Las pruebas `test_blindaje_retiros.py` atacan cada hueco con hilos simultáneos reales contra MySQL.
+
+## 29. Transacciones y movimientos por jerarquía
+
+**Decisión.** `vistas_reportes.py` define el alcance una sola vez por rol (`_alcance_ventas`, `_alcance_bolsas`, `_alcance_limites`) antes de aplicar cualquier filtro de la pantalla. Cada nivel ve lo suyo y lo de abajo:
+- **Caja:** sus ventas y los cambios a su límite. Las columnas `saldo_despues` y `administrador` le llegan en `null`.
+- **Cliente:** las ventas de sus cajas, los asientos de su bolsa y los cambios de límite de sus cajas.
+- **Administrador:** lo de sus clientes y las cajas de estos, más su propia bolsa.
+- **Super Admin:** todo el inquilino.
+
+Un concepto como "Traspaso de Scorpion Centro" dice de dónde vino el dinero, nunca cuánto le queda a quien lo envió. Exportar usa exactamente el mismo alcance y los mismos filtros.
+
+**Consecuencias.** Se guardan además `carrier_control_no`, `response_message` y `pin` de cada venta. El PIN solo lo ve el alcance de esa venta y nunca va a los logs.
+
+## 30. Margen dinámico en administrador y cliente; la caja conserva su límite
+
+**Decisión.** El margen es configurable de 0 % a 100 % con dos decimales: en el alta y después (`red/margen`). El del administrador lo pone el Super Admin y se aplica al fondearlo; el del cliente lo ponen el Super Admin o su administrador y se aplica al traspasarle. Cambiarlo no toca lo ya otorgado (decisión 28).
+
+La caja **no** tiene margen: sigue con límite sobre la bolsa de su cliente (decisión 7), porque no compra saldo y no hay una compra sobre la cual bonificar.
 
 ## Cómo agregar una decisión
 

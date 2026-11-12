@@ -53,6 +53,14 @@ class RegistroEnvio(models.Model):
 
     transaction_id = models.CharField(max_length=60, blank=True)
     control_no = models.CharField(max_length=60, blank=True)
+    # Autorización de la compañía (Telcel, Movistar…): es la que pide el
+    # usuario final si reclama. Emida la manda aparte del controlNo.
+    carrier_control_no = models.CharField(max_length=60, blank=True)
+    # Texto del proveedor tal cual: condiciones, vigencia, motivo de rechazo.
+    response_message = models.TextField(blank=True)
+    # El PIN de las tarjetas de regalo. Solo lo ve la caja que vendió y
+    # quienes están arriba de ella; nunca va a los logs.
+    pin = models.CharField(max_length=120, blank=True)
     response_code = models.CharField(max_length=10, blank=True)
     h2h_result_code = models.CharField(max_length=10, blank=True)
 

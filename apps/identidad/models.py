@@ -286,6 +286,7 @@ class AccionAdministrativa(models.TextChoices):
     RETIRO = "retiro", "Retiro de saldo a EPS"
     RETENCION = "retencion", "Retención de red"
     CANCELA_RETENCION = "cancela_retencion", "Cancelación de retención"
+    CAMBIO_MARGEN = "cambio_margen", "Cambio de margen"
 
 
 class BitacoraAdministracion(models.Model):
