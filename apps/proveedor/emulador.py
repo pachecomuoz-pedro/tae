@@ -69,6 +69,10 @@ class Emulador:
     def lookups(self):
         return [c for c in self.llamadas if "/lookup/invoice-no/" in c["ruta"]]
 
+    @property
+    def on_ramps(self):
+        return [c for c in self.llamadas if c["ruta"].endswith("/transaction/on-ramp")]
+
     def cobros(self):
         """Cuántas veces se descontó balance de verdad. Debe ser 0 o 1."""
         return len([t for t in self.transacciones.values() if t.get("_cobrada")])
@@ -90,6 +94,12 @@ class Emulador:
 
         if ruta.endswith("/transaction/topup"):
             return self._topup(headers, json, timeout)
+
+        if "/on-ramp/exchange-rate" in ruta:
+            return self._on_ramp_exchange_rate(ruta, timeout)
+
+        if ruta.endswith("/transaction/on-ramp"):
+            return self._on_ramp(headers, json, timeout)
 
         if "/lookup/invoice-no/" in ruta:
             return self._lookup(ruta.rsplit("/", 1)[-1], timeout)
@@ -157,6 +167,56 @@ class Emulador:
             return _Resp(200, {"responseCode": "", "responseMessage": "En proceso"})
 
         return _Resp(200, datos)
+
+    def _on_ramp_exchange_rate(self, ruta, timeout):
+        """Devuelve cotización ficticia. No registra transacción."""
+        # Extract the amount from the query string if present, otherwise use 100.
+        amount = "100"
+        if "amount=" in ruta:
+            try:
+                amount = ruta.split("amount=", 1)[1].split("&", 1)[0]
+            except (IndexError, ValueError):
+                pass
+        return _Resp(200, {
+            "originalFiatAmount": amount,
+            "rate": "17.50",
+            "fee": "5.00",
+            "fiatAmountAfterFee": str(Decimal(amount) - Decimal("5.00")),
+        })
+
+    def _on_ramp(self, headers, cuerpo, timeout):
+        """Registra la transacción on-ramp con la misma lógica que _topup."""
+        invoice = str(headers.get("Invoice-No") or "")
+
+        if self.rechazar_http:
+            return _Resp(
+                self.rechazar_http,
+                {"title": "Rechazado", "detail": "Propósito"},
+            )
+
+        if invoice in self.transacciones:
+            previa = dict(self.transacciones[invoice])
+            previa["_duplicada"] = True
+            return _Resp(200, previa)
+
+        if self.nunca_responde or (timeout is not None and self.responde_en > timeout):
+            self.reloj += float(timeout or 0)
+            raise requests.Timeout(f"on_ramp tarda {self.responde_en}s")
+
+        tid = str(next(self._ids))
+        amount_str = str(cuerpo.get("amount", "0")) if cuerpo else "0"
+        cuerpo_resp = {
+            "transactionId": tid,
+            "status": "COMPLETED" if self.aprobar else "FAILED",
+            "targetAmount": "0.00285714",
+            "targetAsset": "BTC",
+            "fee": "5.00" if self.aprobar else "0.00",
+            "amountAfterFee": amount_str,
+            "_cobrada": self.aprobar,
+        }
+        self.transacciones[invoice] = cuerpo_resp
+        self.reloj += self.responde_en
+        return _Resp(200, cuerpo_resp)
 
     def _armar(self, invoice, cuerpo):
         aprobada = self.aprobar

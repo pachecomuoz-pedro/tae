@@ -12,6 +12,7 @@ import { Clientes } from "./Admin";
 import { ErrorAPI, Perfil, Saldo, api, pesos } from "./api";
 import { PuntosVenta } from "./Cliente";
 import { Exposicion } from "./Exposicion";
+import { OnRamp } from "./OnRamp";
 import { Aprobaciones, CambiarContrasena, Red } from "./Red";
 import { Movimientos, Transacciones } from "./Reportes";
 import { SaldoRed } from "./SaldoRed";
@@ -37,7 +38,11 @@ function pantallasDe(perfil: Perfil): Pantalla[] {
     { clave: "movimientos", titulo: "Movimientos de saldo" },
   ];
   if (perfil.capacidades.vender) {
-    return [{ clave: "venta", titulo: "Venta de tiempo aire" }, ...reportes];
+    return [
+      { clave: "venta", titulo: "Venta de tiempo aire" },
+      { clave: "on_ramp", titulo: "Recarga cripto" },
+      ...reportes,
+    ];
   }
   if (perfil.rol === "cliente") {
     return [
@@ -160,6 +165,9 @@ export function App() {
         <main className="flex-1 overflow-y-auto p-5">
           {pantalla === "venta" && (
             <Venta saldo={saldo} alCambiarSaldo={refrescarSaldo} />
+          )}
+          {pantalla === "on_ramp" && (
+            <OnRamp saldo={saldo} alCambiarSaldo={refrescarSaldo} />
           )}
           {pantalla === "cajas" && (
             <PuntosVenta saldo={saldo} alCambiar={refrescarSaldo} />

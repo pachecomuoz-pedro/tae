@@ -33,6 +33,7 @@ from apps.catalogo import servicios as catalogo
 from apps.catalogo.models import ProductoLogico
 from apps.core.models import Cliente, PuntoVenta
 from apps.identidad import acciones, contrasenas, permisos, restablecimiento
+from apps.proveedor.cliente import SinRespuesta
 from apps.proveedor.venta import ProveedorNoDisponible
 from apps.saldo import services
 from apps.saldo.models import Motivo
@@ -120,6 +121,8 @@ def manejar(fn):
             return error(e, status.HTTP_409_CONFLICT, clave="operacion")
         except catalogo.MontoInvalido as e:
             return error(e, status.HTTP_400_BAD_REQUEST, clave="monto")
+        except catalogo.TelefonoInvalido as e:
+            return error(e, status.HTTP_400_BAD_REQUEST, clave="telefono")
         except catalogo.SinRuta as e:
             return error(e, status.HTTP_503_SERVICE_UNAVAILABLE, clave="sin_ruta")
         except catalogo.ProductoNoDisponible as e:
@@ -133,6 +136,11 @@ def manejar(fn):
             )
         except ProveedorNoDisponible as e:
             # La venta no salió y la reserva ya se liberó: 503 y "reintenta".
+            return error(e, status.HTTP_503_SERVICE_UNAVAILABLE, clave="proveedor")
+        except SinRespuesta as e:
+            # Solo llega aquí desde una consulta que no mueve dinero (la
+            # cotización del on-ramp): una venta que no contesta termina en
+            # `sin_resolver`, nunca sube como excepción.
             return error(e, status.HTTP_503_SERVICE_UNAVAILABLE, clave="proveedor")
         except ValidationError as e:
             # Datos de alta que el modelo no acepta, típicamente un correo

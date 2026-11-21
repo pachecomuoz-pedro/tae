@@ -15,7 +15,9 @@ export function Tarjeta({ titulo, children }: {
   );
 }
 
-export function Campo({ etiqueta, valor, alCambiar, marcador, prueba, malo, texto, refCampo }: {
+export function Campo({
+  etiqueta, valor, alCambiar, marcador, prueba, malo, texto, refCampo, alPerderFoco,
+}: {
   etiqueta: string;
   valor: string;
   alCambiar: (v: string) => void;
@@ -24,6 +26,8 @@ export function Campo({ etiqueta, valor, alCambiar, marcador, prueba, malo, text
   malo?: boolean;
   texto?: boolean;
   refCampo?: React.RefObject<HTMLInputElement>;
+  /** Se llama al salir del campo (por ejemplo, para consultar algo con lo capturado). */
+  alPerderFoco?: () => void;
 }) {
   return (
     <label className="block">
@@ -32,6 +36,7 @@ export function Campo({ etiqueta, valor, alCambiar, marcador, prueba, malo, text
         ref={refCampo}
         value={valor}
         onChange={(e) => alCambiar(e.target.value)}
+        onBlur={alPerderFoco}
         placeholder={marcador}
         data-prueba={prueba}
         inputMode={texto ? "text" : "numeric"}

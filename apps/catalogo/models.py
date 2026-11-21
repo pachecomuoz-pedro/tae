@@ -14,7 +14,7 @@ cada etiqueta, y una etiqueta vieja olvidada en un estante vendería al precio
 anterior para siempre.
 """
 import uuid
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -23,12 +23,35 @@ from apps.core.models import Inquilino
 
 CERO = Decimal("0.0000")
 
+# Un producto cripto en rango solo acepta enteros de 1 a 99,999: el proveedor
+# recibe el monto como texto sin decimales (`^[1-9]\d*$`) y lo que no sea
+# entero se rechazaría en la red, después de haber apartado el saldo.
+CRIPTO_RANGO_MIN = 1
+CRIPTO_RANGO_MAX = 99_999
+
+
+def _es_entero_cripto(valor):
+    """True si `valor` es un entero finito entre 1 y 99,999 (acepta int, str y Decimal)."""
+    if isinstance(valor, bool):
+        return False
+    try:
+        v = Decimal(str(valor))
+    except (InvalidOperation, ValueError):
+        return False
+    # NaN e Infinity no se pueden comparar ni son enteros: se descartan antes.
+    return (
+        v.is_finite()
+        and v == v.to_integral_value()
+        and CRIPTO_RANGO_MIN <= v <= CRIPTO_RANGO_MAX
+    )
+
 
 class TipoProducto(models.TextChoices):
-    """Lo que se vende: tiempo aire, pago de servicios o pines."""
+    """Lo que se vende: tiempo aire, pago de servicios, pines o criptomonedas."""
     TIEMPO_AIRE = "tae", "Tiempo aire"
     SERVICIO = "servicio", "Pago de servicio"
     PIN = "pin", "Pin electrónico"
+    CRIPTO = "cripto", "Criptomoneda"
 
 
 class TipoMonto(models.TextChoices):
@@ -143,6 +166,9 @@ class ProductoLogico(models.Model):
             if self.monto_min or self.monto_max:
                 raise ValidationError({"monto_min": "Una denominación fija no lleva rango"})
         elif self.tipo_monto == TipoMonto.RANGO:
+            if self.tipo == TipoProducto.CRIPTO:
+                # Antes de las comparaciones de abajo: un NaN las haría truenar.
+                self._validar_rango_cripto()
             if self.monto_min is None or self.monto_max is None:
                 raise ValidationError({"monto_min": "Un monto abierto necesita mínimo y máximo"})
             if self.monto_min <= CERO or self.monto_max < self.monto_min:
@@ -154,6 +180,25 @@ class ProductoLogico(models.Model):
                 raise ValidationError(
                     {"tipo_monto": "El monto del recibo lo fija la consulta, no el catálogo"}
                 )
+
+    def _validar_rango_cripto(self):
+        """
+        Un rango cripto lleva mínimo y máximo enteros de 1 a 99,999. Se
+        reportan los dos campos a la vez, para que quien da de alta el
+        producto no tenga que corregirlos de uno en uno.
+        """
+        errores = {}
+        for campo in ("monto_min", "monto_max"):
+            valor = getattr(self, campo)
+            if valor is None:
+                errores[campo] = ["Un producto cripto en rango necesita mínimo y máximo"]
+            elif not _es_entero_cripto(valor):
+                errores[campo] = [
+                    f"El monto de un producto cripto debe ser un entero entre "
+                    f"{CRIPTO_RANGO_MIN} y {CRIPTO_RANGO_MAX:,}"
+                ]
+        if errores:
+            raise ValidationError(errores)
 
     @property
     def codigo_barras(self):

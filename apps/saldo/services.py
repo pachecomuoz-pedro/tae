@@ -1039,7 +1039,7 @@ def estado_de_venta(punto_venta):
 # El ciclo de la venta
 # --------------------------------------------------------------------------
 @transaction.atomic
-def reservar(punto_venta, monto, *, producto=None):
+def reservar(punto_venta, monto, *, producto=None, clave=None):
     """
     Aparta el dinero de una venta antes de mandarla al proveedor.
 
@@ -1047,6 +1047,11 @@ def reservar(punto_venta, monto, *, producto=None):
     debitáramos y la venta fallara, habría que devolver, y devolver lo que
     nunca salió es cómo se pierden pesos en el camino. Mientras la respuesta
     no llegue, el dinero está apartado pero no gastado.
+
+    `clave` es la llave de idempotencia (opcional): se guarda en la misma
+    transacción que aparta el saldo, así que si dos peticiones iguales
+    llegan a la vez la restricción única deja pasar solo una y la otra se
+    deshace completa, sin saldo apartado de más.
     """
     monto = q(monto)
     if monto <= CERO:
@@ -1061,6 +1066,8 @@ def reservar(punto_venta, monto, *, producto=None):
         )
 
     cliente = punto_venta.cliente
+    # Si la llave ya se usó, se corta antes de bloquear nada ni mover un centavo.
+    _ya_aplicada(cliente.inquilino, clave)
     # Candados en el orden de siempre: primero las retenciones de la rama
     # (si las hay), luego la bolsa. Sin retenciones esta consulta no bloquea
     # nada y la venta sigue igual que antes.
@@ -1097,7 +1104,7 @@ def reservar(punto_venta, monto, *, producto=None):
     bolsa.save(update_fields=["reservado", "actualizado"])
 
     operacion = _crear_operacion(
-        cliente.inquilino, TipoOperacion.VENTA, punto_venta=punto_venta
+        cliente.inquilino, TipoOperacion.VENTA, punto_venta=punto_venta, clave=clave
     )
     numero, ciclo = siguiente_invoice_no(cliente.inquilino)
     operacion.invoice_no = numero

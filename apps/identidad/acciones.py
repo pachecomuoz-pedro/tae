@@ -12,11 +12,13 @@ Todo lo que cambia la red (altas, aprobaciones, rechazos, suspensiones,
 restablecimientos) deja además una fila en BitacoraAdministracion por medio
 de `registrar`. Ver docs/DECISIONES.md, decisión 17.
 """
+import hashlib
+import re
 import secrets
 from decimal import Decimal
 
 import pyotp
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.core.models import (
@@ -26,7 +28,11 @@ from apps.core.models import (
     EstadoPuntoVenta,
     PuntoVenta,
 )
+from apps.api.proveedor import obtener_cliente
 from apps.catalogo import servicios as catalogo
+from apps.catalogo.models import ProductoLogico, TipoProducto
+from apps.proveedor import on_ramp
+from apps.proveedor.modelos_on_ramp import DesenlaceOnRamp, RegistroOnRamp
 from apps.saldo import services
 from apps.saldo.models import Motivo
 
@@ -537,6 +543,171 @@ def vender(usuario, punto_venta, producto, monto=None):
     monto_final = catalogo.validar_monto(producto, monto)
     catalogo.ruta_para(producto)
     return services.reservar(punto_venta, monto_final, producto=producto)
+
+
+# --------------------------------------------------------------------------
+# On-ramp (pesos → criptomoneda)
+# --------------------------------------------------------------------------
+# Exactamente 12 dígitos ASCII. Se compara con fullmatch: `$` aceptaría un
+# salto de línea al final, y `\d` aceptaría dígitos de otros alfabetos.
+_TELEFONO_ON_RAMP = re.compile(r"[0-9]{12}")
+
+
+def _validar_telefono(phone_number):
+    """El teléfono del on-ramp: 12 dígitos, tal cual, sin espacios ni símbolos."""
+    if not isinstance(phone_number, str) or not _TELEFONO_ON_RAMP.fullmatch(phone_number):
+        raise catalogo.TelefonoInvalido(
+            "El teléfono debe tener exactamente 12 dígitos, sin espacios ni símbolos"
+        )
+
+
+def _obtener_producto_cripto(inquilino, sku):
+    """
+    El producto cripto activo con ese sku. Un producto de otro tipo no se
+    vende por aquí aunque exista: el on-ramp tiene su propia ruta en el
+    proveedor y su propio criterio de aprobación.
+    """
+    producto = (
+        ProductoLogico.objects.select_related("carrier")
+        .filter(
+            inquilino=inquilino, sku=str(sku or "").strip().upper(),
+            tipo=TipoProducto.CRIPTO, activo=True,
+        )
+        .first()
+    )
+    if producto is None:
+        raise catalogo.ProductoNoDisponible(f"No hay un producto cripto con el código {sku!r}")
+    return producto
+
+
+def _caja_que_vende(usuario):
+    """
+    La caja en la que vende este usuario, con las compuertas de la venta.
+
+    Para los roles que no venden, `puede_vender` levanta antes de tocar la
+    caja y con su propio mensaje; por eso se le pasa aunque sea None.
+    """
+    caja = usuario.punto_venta
+    if caja is None and usuario.rol == Rol.PUNTO_VENTA:
+        raise permisos.PermisoDenegado(f"{usuario.nombre} no tiene una caja asignada")
+    permisos.puede_vender(usuario, caja)
+    return caja
+
+
+def _siguiente_invoice_no(inquilino):
+    """
+    El Invoice-No de una consulta de tasa. Sale de la misma secuencia que las
+    ventas (Requirement 6.1), así que cotizar también consume un número: el
+    proveedor pide uno único por cada llamada.
+    """
+    with transaction.atomic():
+        numero, _ciclo = services.siguiente_invoice_no(inquilino)
+    return numero
+
+
+def _clave_on_ramp(caja, clave):
+    """
+    La llave de idempotencia, con alcance de caja (Requirement 6.3): la misma
+    llave en otra caja no choca. Se guarda en `clave_idempotencia` (64
+    caracteres), así que la llave del cliente va resumida: truncarla haría
+    chocar llaves distintas.
+    """
+    if not clave:
+        return None
+    resumen = hashlib.sha256(str(clave).encode()).hexdigest()[:40]
+    return f"or:{caja.pk}:{resumen}"
+
+
+def _cierre_ya_aplicado(inquilino, clave):
+    """
+    Si esa llave ya se usó, el cierre original sin volver a reservar ni a
+    llamar al proveedor (Requirement 6.3 y 6.4); si no, None.
+
+    Una original sin resolver se contesta como sin resolver: pudo haber
+    salido, y devolver "rechazada" invitaría a venderla otra vez.
+    """
+    previa = services.operacion_por_clave(inquilino, clave)
+    if previa is None:
+        return None
+    registro = RegistroOnRamp.objects.filter(operacion=previa).first()
+    if registro is None:
+        # La original apartó el saldo pero todavía no manda: sigue en curso.
+        # Lo traduce `manejar` a 409 en_proceso (Requirement 6.5).
+        raise IntegrityError("operacion idempotente en proceso")
+    desenlace = (
+        registro.desenlace
+        if registro.desenlace in (DesenlaceOnRamp.APROBADA, DesenlaceOnRamp.RECHAZADA)
+        else DesenlaceOnRamp.SIN_RESOLVER
+    )
+    return on_ramp.CierreOnRamp(
+        desenlace=str(desenlace),
+        reserva=previa.reserva,
+        detalle=registro.detalle,
+        transaction_id=registro.transaction_id,
+        target_amount="" if registro.target_amount is None else str(registro.target_amount),
+        target_asset=registro.target_asset,
+        fee="" if registro.fee is None else str(registro.fee),
+        mensaje=registro.response_message,
+        repetida=True,
+    )
+
+
+def cotizar_on_ramp(usuario, *, sku, amount):
+    """
+    La tasa antes de confirmar. Solo una caja cotiza. No mueve saldo: lo
+    único que consume es un Invoice-No.
+
+    El monto se valida antes de consumir el número y antes de salir a la
+    red: un monto malo no gasta nada.
+    """
+    _caja_que_vende(usuario)
+    producto = _obtener_producto_cripto(usuario.inquilino, sku)
+    monto = on_ramp.monto_entero(amount)
+    ruta = catalogo.ruta_para(producto)
+    return on_ramp.exchange_rate(
+        obtener_cliente(),
+        product_id=ruta.product_id,
+        invoice_no=_siguiente_invoice_no(usuario.inquilino),
+        amount=monto,
+    )
+
+
+def vender_on_ramp(usuario, *, sku, amount, phone_number, idempotency_key=None):
+    """
+    Reserva, manda al proveedor y cierra. Mismo orden de compuertas que
+    `vender`: primero lo que no cuesta nada (permiso, llave repetida,
+    teléfono, monto, producto, ruta) y al final lo único que aparta saldo.
+    Una venta que iba a fallar de todos modos no toca el dinero.
+
+    Devuelve un CierreOnRamp; con una llave ya usada, el original con
+    `repetida=True`.
+    """
+    caja = _caja_que_vende(usuario)
+
+    clave = _clave_on_ramp(caja, idempotency_key)
+    previo = _cierre_ya_aplicado(usuario.inquilino, clave)
+    if previo is not None:
+        return previo
+
+    _validar_telefono(phone_number)
+    monto_pesos = on_ramp.monto_entero(amount)
+    producto = _obtener_producto_cripto(usuario.inquilino, sku)
+    monto = catalogo.validar_monto(producto, monto_pesos)
+    if monto != monto.to_integral_value():
+        # Un producto de denominación fija mal dado de alta (100.50). El
+        # proveedor recibe pesos enteros: cobrar 100 por una reserva de
+        # 100.50 sería inventar un monto.
+        raise catalogo.MontoInvalido(
+            f"{producto.nombre} está configurado con un monto con centavos; "
+            "el on-ramp solo vende pesos enteros"
+        )
+    ruta = catalogo.ruta_para(producto)
+
+    reserva = services.reservar(caja, monto, producto=producto, clave=clave)
+    return on_ramp.ejecutar_on_ramp(
+        obtener_cliente(), reserva,
+        product_id=ruta.product_id, phone_number=phone_number,
+    )
 
 
 # --------------------------------------------------------------------------

@@ -10,12 +10,14 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.test import TestCase
+from django.utils import timezone
 
 from apps.catalogo import servicios
 from apps.catalogo.models import (
     Carrier,
     ProductoLogico,
     ProductoProveedor,
+    ProductoDelProveedor,
     Proveedor,
     TipoMonto,
     TipoProducto,
@@ -257,3 +259,42 @@ class LoQueLaCajaOfrece(Base):
         self.assertEqual(
             list(servicios.vendibles(self.inq, TipoProducto.SERVICIO)), [luz]
         )
+
+
+class VincularProductoCripto(TestCase):
+    """`vincular_producto` también sube a la pantalla un producto cripto con rango."""
+
+    def setUp(self):
+        self.inq = Inquilino.objects.create(clave="scorpion", nombre="Scorpion")
+        self.prov = Proveedor.objects.create(inquilino=self.inq, clave="axexo", nombre="axexo")
+        ProductoDelProveedor.objects.create(
+            proveedor=self.prov, product_id="5099900", descripcion="USDT Tether Pruebas",
+            carrier="5000811", monto=D("0"), disponible=True, visto=timezone.now(),
+        )
+
+    def correr(self, **kw):
+        from django.core.management import call_command
+        base = dict(product_id="5099900", sku="CRIPTO-USDT", nombre="USDT Tether",
+                    carrier="USDT", tipo="cripto", rango_min=1, rango_max=500)
+        base.update(kw)
+        call_command("vincular_producto", **base)
+
+    def test_el_usdt_de_pruebas_queda_en_la_pantalla(self):
+        self.correr()
+        p = ProductoLogico.objects.get(sku="CRIPTO-USDT")
+        self.assertEqual((p.tipo, p.tipo_monto, p.monto_min, p.monto_max),
+                         ("cripto", "rango", D("1"), D("500")))
+        self.assertEqual(p.rutas.get().product_id, "5099900")
+        self.assertEqual([x.sku for x in servicios.vendibles(self.inq, tipo="cripto")], ["CRIPTO-USDT"])
+
+    def test_sin_rango_no_se_crea(self):
+        from django.core.management.base import CommandError
+        with self.assertRaises(CommandError):
+            self.correr(rango_min=None, rango_max=None)
+        self.assertFalse(ProductoLogico.objects.exists())
+
+    def test_rango_invalido_no_se_crea(self):
+        from django.core.management.base import CommandError
+        with self.assertRaises(CommandError):
+            self.correr(rango_max=100000)
+        self.assertFalse(ProductoLogico.objects.exists())

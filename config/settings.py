@@ -210,6 +210,9 @@ TAE = {
     "TRASPASO_UMBRAL_2FA": env("TAE_TRASPASO_UMBRAL_2FA", "50000.00"),
     # Tope diario de traspaso por administrador. Al rebasarlo se avisa al Super Admin.
     "TRASPASO_TOPE_DIARIO": env("TAE_TRASPASO_TOPE_DIARIO", "500000.00"),
+    # Cuántas ventas on-ramp sin resolver revisa cada corrida de
+    # `reintentar_pendientes` (se acota entre 1 y 500).
+    "ON_RAMP_LIMITE_CONCILIACION": int(env("TAE_ON_RAMP_LIMITE_CONCILIACION", "100")),
 }
 
 # Candado: el proveedor simulado nunca corre con DEBUG apagado. Si alguien

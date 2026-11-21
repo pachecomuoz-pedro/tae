@@ -101,6 +101,8 @@ PROVEEDOR_CLERK_ID=
 PROVEEDOR_MERCHANT_ID=
 
 TAE_URL_BASE=https://tae.tudominio.mx
+TAE_CRIPTO_MONTO_MIN=1    # rango en pesos con el que `instalar` publica las cripto;
+TAE_CRIPTO_MONTO_MAX=500  # enteros de 1 a 99999. Pon el que Emida acepte en tu cuenta
 EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
 EMAIL_HOST=  EMAIL_HOST_USER=  EMAIL_HOST_PASSWORD=   # para la recuperación por correo
 ```
@@ -139,7 +141,14 @@ Primero comprueba la conexión con Emida (paso 10, primer comando). Después:
 $PROD exec api python manage.py instalar
 ```
 
-Crea el inquilino y los cuatro usuarios iniciales con los correos del `.env` (`TAE_SUPERADMIN_CORREO`, `TAE_ADMIN_CORREO`, `TAE_CLIENTE_CORREO`, `TAE_CAJA_CORREO`). Muestra **una sola vez** sus contraseñas, que deben cambiarse al entrar, y pide escanear el QR del segundo factor del Super Admin. Luego trae de Emida el catálogo real y el saldo real de EPS. Los saldos de la red quedan en cero: los asigna el Super Admin desde la pantalla.
+Crea el inquilino y los cuatro usuarios iniciales con los correos del `.env` (`TAE_SUPERADMIN_CORREO`, `TAE_ADMIN_CORREO`, `TAE_CLIENTE_CORREO`, `TAE_CAJA_CORREO`). Muestra **una sola vez** sus contraseñas, que deben cambiarse al entrar, y pide escanear el QR del segundo factor del Super Admin. Luego trae de Emida el catálogo real y el saldo real de EPS. Las criptomonedas (categoría "Dinero digital" de Emida, como `USDT`) también quedan publicadas en "Recarga cripto", con el rango de `TAE_CRIPTO_MONTO_MIN` y `TAE_CRIPTO_MONTO_MAX`: **define esas dos variables antes de correr `instalar`**. Los saldos de la red quedan en cero: los asigna el Super Admin desde la pantalla.
+
+Cuando Emida agregue una cripto nueva, la sincronización diaria la trae pero no la publica sola. Se sube a mano, con su propio rango:
+
+```bash
+$PROD exec api python manage.py vincular_producto --listar
+$PROD exec api python manage.py vincular_producto --product-id <ID> --sku CRIPTO-<MONEDA> --nombre "<Nombre>" --carrier <MONEDA> --tipo cripto --rango-min 1 --rango-max 500
+```
 
 Si el código del QR falla, actívalo después con:
 
@@ -189,7 +198,7 @@ Después haz **una venta real del monto mínimo** a un número propio y confirma
 Las tareas de la plataforma las corre el contenedor **`tareas`**, que ya se levantó en el paso 5 junto con `web` (decisión 25):
 
 - **Catálogo diario** desde Emida (`sincronizar_catalogo`), a las `TAE_HORA_CATALOGO` (04:00 por omisión).
-- **Reintentos de ventas sin resolver** (`reintentar_pendientes`), cada `TAE_REINTENTOS_MINUTOS` (5). **No es opcional:** sin ellos, una venta sin resolver se queda así para siempre, con el saldo del tendero apartado.
+- **Reintentos de ventas sin resolver** (`reintentar_pendientes`), cada `TAE_REINTENTOS_MINUTOS` (5). Revisan tiempo aire y recargas cripto (hasta `TAE_ON_RAMP_LIMITE_CONCILIACION` cripto por corrida, 100 por omisión). **No es opcional:** sin ellos, una venta sin resolver se queda así para siempre, con el saldo del tendero apartado.
 
 Comprueba que esté arriba y trabajando:
 
@@ -261,6 +270,7 @@ Si algún punto falta, no se abre.
 - [ ] Venta real del monto mínimo verificada de punta a punta
 - [ ] Contenedor `tareas` arriba (catálogo diario y reintentos)
 - [ ] Catálogo sincronizado y productos vinculados
+- [ ] Cripto publicadas con el rango correcto (`TAE_CRIPTO_MONTO_MIN/MAX`) y cotización de prueba hecha desde la caja
 
 **Seguridad**
 - [ ] `DJANGO_DEBUG=false` y `SECRET_KEY` nueva

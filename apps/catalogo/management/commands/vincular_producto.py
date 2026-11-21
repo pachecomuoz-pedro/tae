@@ -10,12 +10,19 @@ Ejemplo (PowerShell, una sola línea):
 
     docker compose exec api python manage.py vincular_producto --product-id 2001 --sku TEL-TAE-100 --nombre "Telcel Tiempo Aire $100" --carrier Telcel --monto 100
 
+Una criptomoneda no tiene monto fijo: el cajero captura cuántos pesos quiere
+convertir, dentro de un rango de enteros (1 a 99,999). Por ejemplo, el
+"USDT Tether Pruebas" (product_id 5099900) del ambiente de pruebas:
+
+    docker compose exec api python manage.py vincular_producto --product-id 5099900 --sku CRIPTO-USDT --nombre "USDT Tether" --carrier USDT --tipo cripto --rango-min 1 --rango-max 500
+
 Para ver los product_id disponibles:
 
     docker compose exec api python manage.py vincular_producto --listar
 """
 from decimal import Decimal
 
+from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils.text import slugify
@@ -43,6 +50,10 @@ class Command(BaseCommand):
         parser.add_argument("--nombre")
         parser.add_argument("--carrier", help="Telcel, AT&T, Movistar…")
         parser.add_argument("--monto", help="Denominación fija. Sin él se usa el monto que reporta Emida.")
+        parser.add_argument("--rango-min", type=int,
+                            help="Solo cripto: monto mínimo en pesos (entero, 1 a 99,999).")
+        parser.add_argument("--rango-max", type=int,
+                            help="Solo cripto: monto máximo en pesos (entero, 1 a 99,999).")
         parser.add_argument("--tipo", default=TipoProducto.TIEMPO_AIRE,
                             choices=[c for c, _ in TipoProducto.choices])
         parser.add_argument("--orden", type=int, default=100)
@@ -87,23 +98,44 @@ class Command(BaseCommand):
                 f"Aviso: {op['product_id']} no aparece en la última sincronización. "
                 "Se vincula de todos modos; revisa que el product_id sea correcto."
             )
-        monto = Decimal(op["monto"]) if op["monto"] else (oferta.monto if oferta else None)
-        if monto is None:
-            raise CommandError("No se conoce el monto: pásalo con --monto")
+        es_cripto = op["tipo"] == TipoProducto.CRIPTO
+        if es_cripto:
+            # Sin monto fijo: Emida reporta amount 0 y el cajero captura el monto.
+            if op["rango_min"] is None or op["rango_max"] is None:
+                raise CommandError("Un producto cripto necesita --rango-min y --rango-max")
+            if op["rango_min"] > op["rango_max"]:
+                raise CommandError("--rango-min no puede ser mayor que --rango-max")
+            monto = None
+        else:
+            if op["rango_min"] is not None or op["rango_max"] is not None:
+                raise CommandError("--rango-min y --rango-max solo aplican con --tipo cripto")
+            monto = Decimal(op["monto"]) if op["monto"] else (oferta.monto if oferta else None)
+            if monto is None:
+                raise CommandError("No se conoce el monto: pásalo con --monto")
 
         carrier, _ = Carrier.objects.get_or_create(
             inquilino=inquilino, clave=slugify(op["carrier"])[:40],
             defaults={"nombre": op["carrier"], "tipo": op["tipo"]},
         )
+        if es_cripto:
+            definicion = {"tipo_monto": TipoMonto.RANGO,
+                          "monto_min": Decimal(op["rango_min"]),
+                          "monto_max": Decimal(op["rango_max"])}
+        else:
+            definicion = {"tipo_monto": TipoMonto.FIJO, "monto_fijo": monto}
         producto, creado = ProductoLogico.objects.get_or_create(
             inquilino=inquilino, sku=op["sku"],
             defaults={
                 "carrier": carrier, "nombre": op["nombre"], "tipo": op["tipo"],
-                "tipo_monto": TipoMonto.FIJO, "monto_fijo": monto, "orden": op["orden"],
+                "orden": op["orden"], **definicion,
             },
         )
         if creado:
-            producto.full_clean()
+            try:
+                producto.full_clean()
+            except ValidationError as e:
+                # transaction.atomic deshace el alta; aquí solo se explica el motivo.
+                raise CommandError(f"Producto inválido: {e.message_dict or e.messages}")
         ruta, ruta_nueva = ProductoProveedor.objects.update_or_create(
             producto=producto, proveedor=proveedor,
             defaults={"product_id": op["product_id"], "activo": True,

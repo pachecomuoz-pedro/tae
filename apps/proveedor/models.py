@@ -5,3 +5,8 @@ from .modelos import (  # noqa: F401
     IntentoProveedor,
     RegistroEnvio,
 )
+from .modelos_on_ramp import (  # noqa: F401
+    DesenlaceOnRamp,
+    IntentoOnRamp,
+    RegistroOnRamp,
+)

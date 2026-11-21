@@ -74,7 +74,7 @@ APROBADOS = {"0", "00"}
 # `h2hResultCode` no lo mencionaron. La matriz sí lo exige en PS-13, así que
 # se aplica la lectura prudente: si el proveedor lo manda, tiene que venir en
 # cero; si no lo manda, no se inventa un requisito que ellos no pidieron.
-METODOS_CONOCIDOS = {"topup", "bill_payment", "lookup"}
+METODOS_CONOCIDOS = {"topup", "bill_payment", "lookup", "on_ramp", "on_ramp_exchange_rate"}
 
 
 def aprobada(metodo, cuerpo):
@@ -82,9 +82,14 @@ def aprobada(metodo, cuerpo):
     True solo si el proveedor confirmó. La ausencia de confirmación no es una
     confirmación: un método desconocido o un cuerpo sin `responseCode` nunca
     aprueban.
+
+    On-ramp usa `status == "COMPLETED"` como criterio, no `responseCode`.
     """
     if metodo not in METODOS_CONOCIDOS:
         return False
+
+    if metodo == "on_ramp":
+        return str(cuerpo.get("status") or "").upper() == "COMPLETED"
 
     codigo = cuerpo.get("responseCode")
     if codigo is None or str(codigo).strip() not in APROBADOS:
@@ -450,4 +455,37 @@ class ClienteProveedor:
             "GET", "/api/v1/terminal/product-flow", metodo="product_flow",
             cabeceras=self._cabeceras(product_id=product_id),
             timeout=self.config.timeout_lookup,
+        )
+
+    # -- on-ramp (conversión de pesos a criptomoneda) ---------------------
+
+    def on_ramp_exchange_rate(self, *, product_id, invoice_no, amount):
+        """
+        Consulta la tasa de cambio antes de confirmar la venta. Informativa,
+        no mueve saldo. Usa `timeout_lookup` porque no es una transacción.
+
+        Headers: Site-Id, Clerk-Id, Product-Id, Language, Invoice-No.
+        Query param: amount como entero positivo.
+        """
+        return self._llamar(
+            "GET",
+            f"/api/v1/transaction/on-ramp/exchange-rate?amount={int(amount)}",
+            metodo="on_ramp_exchange_rate",
+            cabeceras=self._cabeceras(invoice_no=invoice_no, product_id=product_id),
+            timeout=self.config.timeout_lookup,
+        )
+
+    def on_ramp(self, *, invoice_no, product_id, amount, phone_number):
+        """
+        Ejecuta la transacción on-ramp (pesos → criptomoneda).
+
+        Body: {"amount": str(int(amount)), "phoneNumber": phone_number}
+        El criterio de aprobación es status == "COMPLETED" (no responseCode).
+        """
+        return self._llamar(
+            "POST",
+            "/api/v1/transaction/on-ramp",
+            metodo="on_ramp",
+            cabeceras=self._cabeceras(invoice_no=invoice_no, product_id=product_id),
+            cuerpo={"amount": str(int(amount)), "phoneNumber": phone_number},
         )

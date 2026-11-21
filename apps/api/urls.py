@@ -7,7 +7,7 @@ vistas_red.py.
 """
 from django.urls import path
 
-from . import vistas_reportes, vistas, vistas_proveedor, vistas_red
+from . import vistas_on_ramp, vistas_reportes, vistas, vistas_proveedor, vistas_red
 
 urlpatterns = [
     # Sesión y contraseña
@@ -25,6 +25,10 @@ urlpatterns = [
     # Venta y saldo
     path("venta", vistas.vender),
     path("saldo", vistas.mi_saldo),
+
+    # On-ramp (pesos → criptomoneda): cotización sin cargo y venta
+    path("on-ramp/cotizacion", vistas_on_ramp.cotizacion),
+    path("on-ramp/venta", vistas_on_ramp.venta),
 
     # Cajas
     path("puntos-venta", vistas.listar_puntos_venta),

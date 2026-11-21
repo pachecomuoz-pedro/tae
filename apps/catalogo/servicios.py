@@ -41,6 +41,10 @@ class MontoInvalido(ErrorCatalogo):
     """El monto no es uno que este producto acepte."""
 
 
+class TelefonoInvalido(ErrorCatalogo):
+    """El teléfono del on-ramp no tiene exactamente 12 dígitos."""
+
+
 def disponible(producto):
     """Un producto se vende solo si él, su carrier y alguna ruta están vivos."""
     if not producto.activo:

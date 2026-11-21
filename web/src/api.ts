@@ -45,6 +45,12 @@ export class ErrorAPI extends Error {
         return "La venta no se hizo y tu saldo no se tocó. Intenta de nuevo en unos minutos.";
       case "datos":
         return "Revisa los datos capturados.";
+      case "telefono":
+        return "Verifica que el número de teléfono tenga exactamente 12 dígitos.";
+      case "monto":
+        return "Captura un monto entero en pesos, dentro del rango del producto.";
+      case "en_proceso":
+        return "Esa misma venta se está procesando. Espera unos segundos y revisa Transacciones antes de reintentar.";
       case "csrf":
         return (
           "El servidor no reconoce el origen de esta pantalla. Revisa " +
@@ -335,6 +341,36 @@ export interface ResultadoVenta {
   codigo: string;
 }
 
+/**
+ * La tasa de una conversión pesos → cripto, tal como la manda el proveedor
+ * (el servidor las pasa como texto para no perder decimales). Informativa:
+ * cotizar no aparta ni mueve saldo.
+ */
+export interface Cotizacion {
+  rate: string;
+  fee: string;
+  fiatAmountAfterFee: string;
+  originalFiatAmount: string;
+}
+
+/** Cómo terminó una venta on-ramp (cripto). Los tres desenlaces, igual que tiempo aire. */
+export interface ResultadoOnRamp {
+  folio: string;
+  invoice_no: string;
+  desenlace: Desenlace;
+  monto: string;
+  transaction_id: string;
+  target_amount: string;
+  target_asset: string;
+  fee: string;
+  detalle: string;
+  /** Lo que dijo el proveedor: el motivo de un rechazo. */
+  mensaje?: string;
+  /** true si es la respuesta a una llave de idempotencia ya usada. */
+  repetida?: boolean;
+  aviso?: string;
+}
+
 export interface PuntoVenta {
   uuid: string;
   nombre: string;
@@ -441,6 +477,16 @@ export const api = {
 
   vender: (sku: string, cuenta: string, monto?: string) =>
     pedir<ResultadoVenta>("/venta", json({ sku, cuenta, monto })),
+
+  /** Tasa de una conversión a cripto. No mueve saldo; se pide antes de confirmar. */
+  cotizarOnRamp: (sku: string, amount: number) =>
+    pedir<Cotizacion>(
+      "/on-ramp/cotizacion?" + new URLSearchParams({ sku, amount: String(amount) }),
+    ),
+
+  /** Venta de cripto. Con `llave`, repetirla no vuelve a cobrar (sale el cierre original). */
+  venderOnRamp: (sku: string, amount: number, phoneNumber: string, llave?: string) =>
+    pedir<ResultadoOnRamp>("/on-ramp/venta", conLlave({ sku, amount, phoneNumber }, llave)),
 
   puntosVenta: () => pedir<PuntoVenta[]>("/puntos-venta"),
 
