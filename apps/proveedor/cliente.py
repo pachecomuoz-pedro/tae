@@ -25,7 +25,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 import requests
 from django.conf import settings
@@ -352,13 +352,25 @@ class ClienteProveedor:
         return Respuesta.desde(metodo, r.status_code, datos, crudo=r.text[:4000])
 
     # -- métodos del API --------------------------------------------------
+    @staticmethod
+    def _importe(valor):
+        """
+        Un monto como lo pide el API: texto con exactamente 2 decimales ("50.00").
+
+        La base guarda 4 decimales (50.0000) y el proveedor rechaza con 400
+        "amount must have at most 2 decimal places". El catálogo ya rechaza
+        montos con centavos de más antes de reservar, así que aquí cuantizar
+        nunca cambia el valor: solo el formato.
+        """
+        return str(Decimal(str(valor)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
     def topup(self, *, invoice_no, product_id, account_id, amount):
         """Venta de tiempo aire. PinDistSale en el nombre viejo."""
         return self._llamar(
             "POST", "/api/v1/transaction/topup",
             metodo="topup",
             cabeceras=self._cabeceras(invoice_no=invoice_no, product_id=product_id),
-            cuerpo={"accountId": str(account_id), "amount": str(Decimal(amount))},
+            cuerpo={"accountId": str(account_id), "amount": self._importe(amount)},
         )
 
     def user_fee(self, product_id):
@@ -384,8 +396,8 @@ class ClienteProveedor:
             cabeceras=self._cabeceras(invoice_no=invoice_no, product_id=product_id),
             cuerpo={
                 "accountNumber": str(account_number),
-                "amount": str(Decimal(amount)),
-                "userFee": str(Decimal(fee)),
+                "amount": self._importe(amount),
+                "userFee": self._importe(fee),
             },
         )
 

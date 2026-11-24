@@ -289,61 +289,89 @@ function Rail({ perfil, pantallas, pendientes, actual, alElegir, alSalir }: {
   alElegir: (clave: string) => void;
   alSalir: () => void;
 }) {
+  // En celular el menú no cabe en una fila: se pliega detrás de un botón.
+  // En computadora (md en adelante) siempre está abierto a la izquierda.
+  const [abierto, setAbierto] = useState(false);
+  const visible = abierto ? "flex" : "hidden";
+
   return (
-    <nav className="flex shrink-0 flex-row items-center gap-3 bg-rail px-4 py-3 md:w-56 md:flex-col md:items-stretch md:py-6">
-      <div className="flex items-center gap-2.5">
+    <nav className="flex shrink-0 flex-col bg-rail md:w-56 md:px-4 md:py-6">
+      <div className="flex items-center gap-2.5 px-4 py-3 md:p-0">
         <span className="grid h-8 w-8 place-items-center rounded-lg bg-acento font-display text-sm font-bold text-rail">
           S
         </span>
         <span className="font-display text-lg font-bold text-white">
           EPS <span className="text-acento">TAE</span>
         </span>
-      </div>
-
-      {pantallas.length > 1 && (
-        <div className="flex gap-1 md:mt-6 md:flex-col">
-          {pantallas.map((p) => (
-            <button
-              key={p.clave}
-              type="button"
-              onClick={() => alElegir(p.clave)}
-              data-pantalla={p.clave}
-              className={
-                "rounded-lg px-3 py-2.5 text-left text-sm transition " +
-                (actual === p.clave
-                  ? "bg-rail-activo font-semibold text-white"
-                  : "text-rail-texto hover:bg-rail-activo/50")
-              }
-            >
-              <span className="flex items-center gap-2">
-                <span className="flex-1">{p.titulo}</span>
-                {p.clave === "aprobaciones" && pendientes > 0 && (
-                  <span className="min-w-5 rounded-full bg-acento px-1.5 text-center text-[11px] font-bold text-rail">
-                    {pendientes}
-                  </span>
-                )}
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div className="ml-auto md:ml-0 md:mt-auto md:border-t md:border-rail-borde md:pt-4">
-        <p className="hidden text-[11px] uppercase tracking-wide text-rail-tenue md:block">
-          Sesión
-        </p>
-        <p className="text-sm font-semibold text-white">{perfil.nombre}</p>
-        <p className="hidden md:mt-1.5 md:block">
-          <EtiquetaRol perfil={perfil} fuerte />
-        </p>
         <button
           type="button"
-          onClick={alSalir}
-          data-prueba="salir"
-          className="mt-2 text-xs text-rail-texto underline underline-offset-2"
+          onClick={() => setAbierto(!abierto)}
+          aria-expanded={abierto}
+          aria-controls="menu-principal"
+          data-prueba="abrir-menu"
+          className="ml-auto flex items-center gap-2 rounded-lg border border-rail-borde px-3 py-2 text-sm font-semibold text-white md:hidden"
         >
-          Salir
+          {!abierto && pendientes > 0 && (
+            <span className="min-w-5 rounded-full bg-acento px-1.5 text-center text-[11px] font-bold text-rail">
+              {pendientes}
+            </span>
+          )}
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            {abierto ? <path d="M6 6l12 12M18 6 6 18" /> : <path d="M4 7h16M4 12h16M4 17h16" />}
+          </svg>
+          {abierto ? "Cerrar" : "Menú"}
         </button>
+      </div>
+
+      <div id="menu-principal" className={visible + " flex-1 flex-col md:flex"}>
+        {pantallas.length > 1 && (
+          <div className="flex flex-col gap-1 px-3 pb-2 md:mt-6 md:px-0 md:pb-0">
+            {pantallas.map((p) => (
+              <button
+                key={p.clave}
+                type="button"
+                onClick={() => { alElegir(p.clave); setAbierto(false); }}
+                data-pantalla={p.clave}
+                className={
+                  "rounded-lg px-3 py-3 text-left text-sm transition md:py-2.5 " +
+                  (actual === p.clave
+                    ? "bg-rail-activo font-semibold text-white"
+                    : "text-rail-texto hover:bg-rail-activo/50")
+                }
+              >
+                <span className="flex items-center gap-2">
+                  <span className="flex-1">{p.titulo}</span>
+                  {p.clave === "aprobaciones" && pendientes > 0 && (
+                    <span className="min-w-5 rounded-full bg-acento px-1.5 text-center text-[11px] font-bold text-rail">
+                      {pendientes}
+                    </span>
+                  )}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-center gap-3 border-t border-rail-borde px-4 py-3 md:mt-auto md:block md:px-0 md:pb-0 md:pt-4">
+          <div className="min-w-0 flex-1">
+            <p className="hidden text-[11px] uppercase tracking-wide text-rail-tenue md:block">
+              Sesión
+            </p>
+            <p className="truncate text-sm font-semibold text-white">{perfil.nombre}</p>
+            <p className="mt-1.5">
+              <EtiquetaRol perfil={perfil} fuerte />
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={alSalir}
+            data-prueba="salir"
+            className="rounded-lg border border-rail-borde px-3 py-2 text-xs font-semibold text-rail-texto md:mt-2 md:border-0 md:p-0 md:underline md:underline-offset-2"
+          >
+            Salir
+          </button>
+        </div>
       </div>
     </nav>
   );

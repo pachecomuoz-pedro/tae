@@ -92,6 +92,18 @@ def rutas_de_respaldo(producto):
     )
 
 
+def exigir_centavos(monto, producto):
+    """
+    Rechaza un monto con más de 2 decimales. El proveedor solo acepta
+    centavos, y redondear aquí haría que al cliente se le cobre una cantidad
+    y al proveedor se le mande otra.
+    """
+    d = Decimal(str(monto))
+    if d != d.quantize(Decimal("0.01")):
+        raise MontoInvalido(f"{producto.nombre}: el monto {d.normalize()} tiene más de 2 decimales")
+    return monto
+
+
 def validar_monto(producto, monto=None):
     """
     Devuelve el monto que se va a cobrar, o levanta diciendo por qué no.
@@ -102,13 +114,14 @@ def validar_monto(producto, monto=None):
     disponible(producto)
 
     if producto.tipo_monto == TipoMonto.FIJO:
-        return q(producto.monto_fijo)
+        return exigir_centavos(q(producto.monto_fijo), producto)
 
     if producto.tipo_monto == TipoMonto.RECIBO:
         if monto is None:
             raise MontoInvalido(
                 f"{producto.nombre} cobra lo que diga el recibo: falta consultarlo"
             )
+        exigir_centavos(monto, producto)
         monto = q(monto)
         if monto <= CERO:
             raise MontoInvalido("El adeudo del recibo tiene que ser positivo")
@@ -117,6 +130,7 @@ def validar_monto(producto, monto=None):
     # RANGO
     if monto is None:
         raise MontoInvalido(f"{producto.nombre} necesita que se capture un monto")
+    exigir_centavos(monto, producto)
     monto = q(monto)
     if monto < q(producto.monto_min) or monto > q(producto.monto_max):
         raise MontoInvalido(
