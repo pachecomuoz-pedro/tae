@@ -14,13 +14,27 @@
  *    disponible, la vista previa dice cuánto se retira y cuánto se retiene.
  * 3. **Las retenciones vivas**, con su folio de origen, para que nadie
  *    tenga que adivinar por qué una red dejó de vender.
+ *
+ * Puntos de venta: una caja no tiene dinero propio (decisión 7). Aquí se
+ * le ABONA subiendo su límite sobre la bolsa de su cliente, y se le RETIRA
+ * bajándolo con motivo. Es lo mismo que "Límite" en Usuarios de la red; vive
+ * también aquí porque es donde el Super Admin busca todo lo del saldo.
  */
 import { useEffect, useState } from "react";
 
 import { ErrorAPI, FilaRed, Retencion, api, nuevaLlave, pesos } from "./api";
+import { SelectorMotivo } from "./Cliente";
 import { Aviso, Campo, Tarjeta } from "./piezas";
 
-type Nivel = "administrador" | "cliente";
+type Nivel = "administrador" | "cliente" | "punto_venta";
+/** Los niveles que tienen dinero propio y reciben o regresan saldo de EPS. */
+type NivelDinero = Exclude<Nivel, "punto_venta">;
+
+const NOMBRE_NIVEL: Record<Nivel, [string, string]> = {
+  administrador: ["Administradores", "Administrador"],
+  cliente: ["Clientes", "Cliente"],
+  punto_venta: ["Puntos de venta", "Punto de venta"],
+};
 
 const MOTIVOS = [
   ["fondeo_excedente", "Fondeo de más (corrección)"],
@@ -37,8 +51,13 @@ export function SaldoRed({ alCambiar }: { alCambiar: () => void }) {
   const [elegido, setElegido] = useState<FilaRed | null>(null);
   const [retenciones, setRetenciones] = useState<Retencion[]>([]);
   const [buscar, setBuscar] = useState("");
+  // Para una caja se muestra cuánto tiene libre su cliente: es el tope real del abono.
+  const [clientes, setClientes] = useState<FilaRed[]>([]);
 
   const cargar = (conservar?: string) => {
+    if (nivel === "punto_venta") {
+      api.red("cliente").then(setClientes).catch(() => setClientes([]));
+    }
     api.red(nivel).then((f) => {
       setFilas(f);
       if (conservar) setElegido(f.find((x) => x.uuid === conservar) ?? null);
@@ -60,12 +79,12 @@ export function SaldoRed({ alCambiar }: { alCambiar: () => void }) {
       <div className="space-y-5">
         <Tarjeta titulo="Red">
           <div className="mb-3 flex flex-wrap gap-2">
-            {(["administrador", "cliente"] as const).map((n) => (
+            {(["administrador", "cliente", "punto_venta"] as const).map((n) => (
               <button key={n} type="button" onClick={() => setNivel(n)} data-nivel={n}
                       className={"rounded-xl border px-4 py-2 text-sm font-semibold " +
                         (nivel === n ? "border-primario bg-primario text-white"
                                      : "border-borde bg-white text-tinta-dos")}>
-                {n === "administrador" ? "Administradores" : "Clientes"}
+                {NOMBRE_NIVEL[n][0]}
               </button>
             ))}
             <input value={buscar} onChange={(e) => setBuscar(e.target.value)}
@@ -74,9 +93,9 @@ export function SaldoRed({ alCambiar }: { alCambiar: () => void }) {
           </div>
 
           <div className="grid grid-cols-[1fr_auto_auto] gap-x-5 px-3 pb-2 text-[11px] font-bold uppercase tracking-wide text-apagado">
-            <span>{nivel === "administrador" ? "Administrador" : "Cliente"}</span>
-            <span className="text-right">Disponible</span>
-            <span className="w-28 text-right">Saldo red</span>
+            <span>{NOMBRE_NIVEL[nivel][1]}</span>
+            <span className="text-right">{nivel === "punto_venta" ? "Límite" : "Disponible"}</span>
+            <span className="w-28 text-right">{nivel === "punto_venta" ? "Bolsa" : "Saldo red"}</span>
           </div>
           <div className="space-y-2">
             {visibles.map((f) => {
@@ -98,12 +117,25 @@ export function SaldoRed({ alCambiar }: { alCambiar: () => void }) {
                       )}
                     </span>
                   </span>
-                  <span className="cifras text-right font-display text-sm font-bold text-primario">
-                    {pesos(f.disponible)}
-                  </span>
-                  <span className="cifras w-28 text-right font-display text-sm font-bold">
-                    {pesos(f.saldo_red)}
-                  </span>
+                  {nivel === "punto_venta" ? (
+                    <>
+                      <span className="cifras text-right font-display text-sm font-bold text-primario">
+                        {f.modo_bolsa === "compartida" ? "—" : pesos(f.limite ?? "0")}
+                      </span>
+                      <span className="w-28 text-right text-xs font-semibold text-apagado">
+                        {f.modo_bolsa === "compartida" ? "Compartida" : "Por caja"}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="cifras text-right font-display text-sm font-bold text-primario">
+                        {pesos(f.disponible)}
+                      </span>
+                      <span className="cifras w-28 text-right font-display text-sm font-bold">
+                        {pesos(f.saldo_red)}
+                      </span>
+                    </>
+                  )}
                 </button>
               );
             })}
@@ -115,12 +147,15 @@ export function SaldoRed({ alCambiar }: { alCambiar: () => void }) {
       </div>
 
       <aside>
-        {elegido ? (
-          <Panel key={elegido.uuid} fila={elegido} nivel={nivel} alHecho={hecho} />
+        {elegido && nivel === "punto_venta" ? (
+          <PanelCaja key={elegido.uuid} fila={elegido}
+                     cliente={clientes.find((c) => c.nombre === elegido.padre) ?? null}
+                     alHecho={hecho} />
+        ) : elegido ? (
+          <Panel key={elegido.uuid} fila={elegido} nivel={nivel as NivelDinero} alHecho={hecho} />
         ) : (
           <div className="rounded-2xl border border-borde bg-white p-5 text-sm text-apagado">
-            Elige un {nivel === "administrador" ? "administrador" : "cliente"} para abonarle o
-            retirarle saldo.
+            Elige un {NOMBRE_NIVEL[nivel][1].toLowerCase()} para abonarle o retirarle saldo.
           </div>
         )}
       </aside>
@@ -128,7 +163,7 @@ export function SaldoRed({ alCambiar }: { alCambiar: () => void }) {
   );
 }
 
-function Panel({ fila, nivel, alHecho }: { fila: FilaRed; nivel: Nivel; alHecho: () => void }) {
+function Panel({ fila, nivel, alHecho }: { fila: FilaRed; nivel: NivelDinero; alHecho: () => void }) {
   const [modo, setModo] = useState<"abonar" | "retirar">("abonar");
   const opera = ["activo", "aprobado"].includes(fila.estado);
 
@@ -171,7 +206,7 @@ function Panel({ fila, nivel, alHecho }: { fila: FilaRed; nivel: Nivel; alHecho:
   );
 }
 
-function Abonar({ fila, nivel, alHecho }: { fila: FilaRed; nivel: Nivel; alHecho: () => void }) {
+function Abonar({ fila, nivel, alHecho }: { fila: FilaRed; nivel: NivelDinero; alHecho: () => void }) {
   const [monto, setMonto] = useState("");
   const [error, setError] = useState<ErrorAPI | null>(null);
   const [hecho, setHecho] = useState("");
@@ -227,7 +262,7 @@ function Abonar({ fila, nivel, alHecho }: { fila: FilaRed; nivel: Nivel; alHecho
   );
 }
 
-function Retirar({ fila, nivel, alHecho }: { fila: FilaRed; nivel: Nivel; alHecho: () => void }) {
+function Retirar({ fila, nivel, alHecho }: { fila: FilaRed; nivel: NivelDinero; alHecho: () => void }) {
   const [monto, setMonto] = useState("");
   const [motivo, setMotivo] = useState("fondeo_excedente");
   const [nota, setNota] = useState("");
@@ -420,6 +455,138 @@ function Linea({ t, v, ambar }: { t: string; v: string; ambar?: boolean }) {
     <div className="flex justify-between gap-3">
       <span className="text-apagado">{t}</span>
       <span className={"cifras font-bold " + (ambar ? "text-ambar-texto" : "")}>{v}</span>
+    </div>
+  );
+}
+
+
+/**
+ * Abonar o retirar a una caja. Abonar SUBE su límite en el monto (se reserva
+ * de la bolsa de su cliente); retirar lo BAJA y lleva motivo. Ninguno de los
+ * dos mueve dinero de EPS: el dinero ya está en la bolsa del cliente.
+ */
+function PanelCaja({ fila, cliente, alHecho }: {
+  fila: FilaRed;
+  cliente: FilaRed | null;
+  alHecho: () => void;
+}) {
+  const [modo, setModo] = useState<"abonar" | "retirar">("abonar");
+  const [monto, setMonto] = useState("");
+  const [motivo, setMotivo] = useState("");
+  const [nota, setNota] = useState("");
+  const [error, setError] = useState<ErrorAPI | null>(null);
+  const [hecho, setHecho] = useState("");
+  const [enviando, setEnviando] = useState(false);
+
+  const compartida = fila.modo_bolsa === "compartida";
+  const opera = ["activo", "aprobado"].includes(fila.estado);
+  const actual = Number(fila.limite ?? 0);
+  const n = Number(monto) || 0;
+  const libreCliente = cliente ? Number(cliente.disponible ?? 0) : null;
+  const excedeCliente = modo === "abonar" && libreCliente !== null && n > libreCliente;
+  const excedeCaja = modo === "retirar" && n > actual;
+  const listo =
+    n > 0 && !enviando && !excedeCaja && !excedeCliente &&
+    (modo === "abonar" ? opera : motivo !== "" && (motivo !== "otro" || nota.trim().length > 3));
+
+  async function enviar() {
+    setEnviando(true);
+    setError(null);
+    try {
+      if (modo === "abonar") {
+        const r = await api.asignarLimite(fila.uuid, String(actual + n));
+        setHecho(`Se abonaron ${pesos(n)} a ${fila.nombre}. Su límite quedó en ${pesos(r.limite)}.`);
+      } else {
+        const r = await api.retirarDeCaja(fila.uuid, String(n), motivo, nota);
+        setHecho(`Se retiraron ${pesos(n)} de ${fila.nombre}. Su límite quedó en ${pesos(r.limite)}.`);
+      }
+      setMonto("");
+      setMotivo("");
+      setNota("");
+      alHecho();
+    } catch (e) {
+      setError(e as ErrorAPI);
+    } finally {
+      setEnviando(false);
+    }
+  }
+
+  return (
+    <div className="rounded-2xl border border-borde bg-white p-5" data-prueba="panel-caja">
+      <h3 className="font-display text-base font-bold">{fila.nombre}</h3>
+      <p className="text-xs text-apagado">de {fila.padre}</p>
+
+      {compartida ? (
+        <p className="mt-4 rounded-xl bg-suave p-3 text-sm text-tinta-dos">
+          {fila.padre} opera en bolsa compartida: sus cajas venden directo de la
+          bolsa del cliente y no tienen límite propio. Para darle saldo, abónale
+          al cliente en la pestaña Clientes.
+        </p>
+      ) : (
+        <>
+          <dl className="mt-3 grid grid-cols-2 gap-3">
+            <Dato t="Límite de la caja" v={pesos(actual)} acento />
+            <Dato t={`Libre en ${fila.padre ?? "el cliente"}`}
+                  v={libreCliente === null ? "—" : pesos(libreCliente)} />
+          </dl>
+
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            {(["abonar", "retirar"] as const).map((m) => (
+              <button key={m} type="button" data-modo-caja={m}
+                      onClick={() => { setModo(m); setError(null); setHecho(""); }}
+                      className={"rounded-xl border p-2.5 text-sm font-bold " +
+                        (modo === m ? "border-2 border-primario bg-elegido" : "border-borde")}>
+                {m === "abonar" ? "Abonar a la caja" : "Retirar de la caja"}
+              </button>
+            ))}
+          </div>
+
+          {modo === "abonar" && !opera ? (
+            <p className="mt-4 rounded-xl bg-suave p-3 text-sm text-tinta-dos">
+              {fila.nombre} está {fila.estado}: no puede recibir saldo.
+            </p>
+          ) : (
+            <div className="mt-4 space-y-3">
+              <Campo etiqueta={modo === "abonar" ? "Monto a abonar" : "Monto a retirar"}
+                     valor={monto} marcador="0.00" prueba="monto-caja"
+                     alCambiar={(v) => setMonto(v.replace(/[^0-9.]/g, ""))} />
+              {n > 0 && !excedeCaja && !excedeCliente && (
+                <p className="rounded-xl bg-elegido p-3 text-xs">
+                  El límite pasa de {pesos(actual)} a{" "}
+                  <b className="cifras">{pesos(modo === "abonar" ? actual + n : actual - n)}</b>.
+                  {modo === "abonar" && " Se reserva de la bolsa del cliente; no sale de EPS."}
+                </p>
+              )}
+              {excedeCliente && (
+                <p className="rounded-xl bg-ambar-fondo p-3 text-xs font-semibold text-ambar-texto">
+                  {fila.padre} solo tiene {pesos(libreCliente)} libres. Abónale primero al cliente.
+                </p>
+              )}
+              {excedeCaja && (
+                <p className="rounded-xl bg-ambar-fondo p-3 text-xs font-semibold text-ambar-texto">
+                  La caja solo tiene {pesos(actual)} asignados.
+                </p>
+              )}
+              {modo === "retirar" && (
+                <>
+                  <SelectorMotivo valor={motivo} alCambiar={setMotivo} />
+                  <Campo etiqueta={motivo === "otro" ? 'Nota · obligatoria para "Otro"' : "Nota · opcional"}
+                         valor={nota} alCambiar={setNota} texto />
+                </>
+              )}
+              {error && <Aviso error={error} />}
+              {hecho && (
+                <p className="rounded-xl bg-exito-fondo p-3 text-sm font-semibold text-exito-oscuro"
+                   data-prueba="hecho-caja">{hecho}</p>
+              )}
+              <button type="button" onClick={enviar} disabled={!listo} data-prueba="enviar-caja"
+                      className="w-full rounded-xl bg-primario py-3.5 font-display text-base font-bold text-white disabled:bg-[#D3D9E1] disabled:text-[#7A8699]">
+                {enviando ? "Guardando…" : modo === "abonar" ? "Abonar" : "Retirar"}
+              </button>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

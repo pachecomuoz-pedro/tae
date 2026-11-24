@@ -267,6 +267,7 @@ Todos se corren con `docker compose exec api python manage.py <comando>`.
 | El Super Admin no puede entrar | Falta activar su segundo factor | `preparar_super_admin --correo ... --solo-totp` |
 | La app no arranca: "PROVEEDOR_MODO=simulado no se permite" | `.env` de desarrollo en producción | `PROVEEDOR_MODO=real` |
 | Cambié el `.env` y no pasa nada | El reinicio no vuelve a leer el archivo | `docker compose up -d --force-recreate api` |
+| `Access denied ... to database 'test_tae'` al correr pruebas | El volumen de MySQL se creó antes del permiso para la base de pruebas | `docker compose up -d db` y luego `docker compose exec db sh /docker-entrypoint-initdb.d/01-permisos-pruebas.sh` |
 | `Access denied for user` en MySQL | El volumen se creó con otras credenciales | `docker compose down -v` (**borra la base local**) |
 | No existe `/admin` | Decisión: toda alta pasa por la API, con permisos y bitácora | Usar la pantalla "Usuarios de la red" |
 | Exposición: "no se encontró el saldo en la respuesta" | Emida usa otro nombre de campo | Revisar la respuesta guardada y agregar el campo en `CAMPOS_SALDO` (`apps/proveedor/saldo.py`) |

@@ -235,14 +235,14 @@ export function PuntosVenta({ saldo, alCambiar }: {
   );
 }
 
-const MOTIVOS_CAJA = [
+export const MOTIVOS_CAJA = [
   ["captura", "Error de captura en el monto"],
   ["cliente_equivocado", "Se asignó a la caja equivocada"],
   ["suspension", "Recuperación de saldo de la caja"],
   ["otro", "Otro"],
 ] as const;
 
-function SelectorMotivo({ valor, alCambiar }: { valor: string; alCambiar: (v: string) => void }) {
+export function SelectorMotivo({ valor, alCambiar }: { valor: string; alCambiar: (v: string) => void }) {
   return (
     <select value={valor} onChange={(e) => alCambiar(e.target.value)} data-prueba="motivo-caja"
             className="w-full rounded-xl border border-campo bg-white px-3 py-2.5 text-sm outline-none focus:border-primario">

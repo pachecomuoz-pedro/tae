@@ -284,6 +284,11 @@ def _producto_json(p):
         "sku": p.sku,
         "nombre": p.nombre,
         "carrier": p.carrier.nombre,
+        # La pantalla de venta pone los 8 primeros carriers como botones fijos
+        # y agrupa el resto en "Otros"; el orden lo decide una persona en el
+        # catálogo, no el código.
+        "carrier_orden": p.carrier.orden,
+        "familia": catalogo.familia_de(p),
         "tipo": p.tipo,
         "tipo_monto": p.tipo_monto,
         "monto_fijo": str(p.monto_fijo) if p.monto_fijo is not None else None,

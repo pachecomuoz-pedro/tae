@@ -306,6 +306,11 @@ class SaldoYCatalogo(BaseAPI):
         self.assertEqual(datos[0]["codigo_barras"], "TEL-TAE-100")
         self.assertEqual(datos[0]["etiqueta_monto"], "$100.00")
 
+    def test_el_catalogo_trae_orden_del_carrier_y_familia(self):
+        datos = self.como("luis@laermita.mx").get("/api/catalogo").json()
+        self.assertIn("carrier_orden", datos[0])
+        self.assertEqual(datos[0]["familia"], "Tiempo aire")
+
     def test_escanear_resuelve_el_producto(self):
         r = self.como("luis@laermita.mx").get("/api/catalogo/codigo/TEL-TAE-100")
         self.assertEqual(r.json()["sku"], "TEL-TAE-100")

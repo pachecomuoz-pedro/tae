@@ -5,6 +5,7 @@
 #   api      Django (runserver)            → http://localhost:8000/api
 #   tareas   programador: catálogo diario y reintentos de ventas
 #   web      React (Vite, recarga en vivo) → http://localhost:5173
+#   correo   Mailpit: bandeja de correos de prueba → http://localhost:8025
 #
 #   docker compose up -d --build
 #
@@ -23,8 +24,12 @@ services:
       - "3307:3306"
     volumes:
       - datos_mysql:/var/lib/mysql
+      # Permiso para la base de pruebas (test_<nombre>); corre al crear el volumen.
+      - ./docker/mysql:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      # Por TCP (127.0.0.1) y no por socket: durante la primera inicialización
+      # el servidor temporal solo escucha en el socket y daría "sano" antes de tiempo.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--protocol=tcp"]
       interval: 5s
       retries: 20
 
@@ -33,7 +38,7 @@ services:
 
   api:
     build: .
-    command: python manage.py runserver 0.0.0.0:8000
+    command: sh -c "python manage.py esperar_bd && python manage.py runserver 0.0.0.0:8000"
     env_file: .env
     volumes:
       - .:/app
@@ -48,7 +53,7 @@ services:
   # apps/core/management/commands/programador.py.
   tareas:
     build: .
-    command: python manage.py programador
+    command: sh -c "python manage.py esperar_bd && python manage.py programador"
     env_file: .env
     volumes:
       - .:/app
@@ -72,6 +77,14 @@ services:
       - "5173:5173"
     depends_on:
       - api
+
+  # Simulador de correo: atrapa todo lo que manda Django (recuperación de
+  # contraseña, avisos) y lo muestra en http://localhost:8025. Nada sale a
+  # internet. En .env: EMAIL_BACKEND smtp, EMAIL_HOST=correo, EMAIL_PORT=1025.
+  correo:
+    image: axllent/mailpit:latest
+    ports:
+      - "8025:8025"
 
 volumes:
   datos_mysql:

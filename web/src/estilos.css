@@ -7,3 +7,10 @@ body { background: #F2F4F7; color: #13243D; }
 
 /* Los números de dinero se leen en columna: tabulares o no se alinean. */
 .cifras { font-variant-numeric: tabular-nums; }
+
+/* Imprimir ticket: solo el recuadro del folio, sin menú ni encabezado. */
+@media print {
+  body * { visibility: hidden; }
+  .ticket, .ticket * { visibility: visible; }
+  .ticket { position: absolute; left: 0; top: 0; width: 80mm; border: 0; }
+}

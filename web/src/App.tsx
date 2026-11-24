@@ -19,6 +19,40 @@ import { SaldoRed } from "./SaldoRed";
 import { Venta } from "./Venta";
 
 /**
+ * Color de cada rol, para saber de un vistazo en qué sesión está la pantalla.
+ *
+ * Se ve en tres lugares: la franja superior del contenido, la etiqueta junto
+ * al título y la etiqueta de la sesión en el menú. No reutiliza el verde, el
+ * ámbar ni el rojo: esos ya significan aprobada, sin confirmar y rechazada.
+ * Los cuatro se distinguen también por claridad, no solo por tono, y el
+ * texto blanco sobre cada uno pasa 4.5:1.
+ */
+export const COLOR_ROL: Record<string, { fuerte: string; claro: string }> = {
+  super_admin: { fuerte: "#6D28D9", claro: "#F1EBFD" },   // violeta
+  administrador: { fuerte: "#0F766E", claro: "#E3F3F1" }, // verde azulado
+  cliente: { fuerte: "#BE185D", claro: "#FCE7F1" },       // magenta
+  punto_venta: { fuerte: "#1D4ED8", claro: "#E6EEFD" },   // azul
+};
+const colorDe = (rol: string) => COLOR_ROL[rol] ?? { fuerte: "#5A6C85", claro: "#EFF2F6" };
+
+/** Etiqueta del rol con su color. `fuerte`: fondo de color y texto blanco. */
+function EtiquetaRol({ perfil, fuerte }: { perfil: Perfil; fuerte?: boolean }) {
+  const c = colorDe(perfil.rol);
+  return (
+    <span
+      data-prueba="etiqueta-rol"
+      data-rol={perfil.rol}
+      style={fuerte ? { background: c.fuerte, color: "#FFFFFF" } : { background: c.claro, color: c.fuerte }}
+      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-bold"
+    >
+      <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full"
+            style={{ background: fuerte ? "#FFFFFF" : c.fuerte }} />
+      {perfil.rol_nombre}
+    </span>
+  );
+}
+
+/**
  * Qué pantallas ve cada rol.
  *
  * Esto decide qué pintar, no qué se permite: el servidor vuelve a verificar
@@ -79,6 +113,11 @@ export function App() {
   const [cargando, setCargando] = useState(true);
   const [pantalla, setPantalla] = useState("");
   const [pendientes, setPendientes] = useState(0);
+
+  // El rol también en la pestaña del navegador: "EPS TAE · Super Admin".
+  useEffect(() => {
+    document.title = perfil ? `EPS TAE · ${perfil.rol_nombre}` : "EPS TAE";
+  }, [perfil]);
 
   /**
    * Refresca lo que se ve en el encabezado y en el menú: el saldo y el
@@ -150,10 +189,14 @@ export function App() {
       />
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center justify-between border-b border-borde bg-white px-5 py-4">
+        <header
+          className="flex items-center justify-between border-b border-t-[7px] border-b-borde bg-white px-5 py-4"
+          style={{ borderTopColor: colorDe(perfil.rol).fuerte }}
+        >
           <div>
-            <p className="text-[11px] uppercase tracking-wide text-apagado">
-              {perfil.entidad || perfil.rol_nombre}
+            <p className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-wide text-apagado">
+              <EtiquetaRol perfil={perfil} />
+              {perfil.entidad && <span>{perfil.entidad}</span>}
             </p>
             <h1 className="font-display text-lg font-bold">
               {pantallasDe(perfil).find((p) => p.clave === pantalla)?.titulo ?? "Tablero"}
@@ -290,7 +333,9 @@ function Rail({ perfil, pantallas, pendientes, actual, alElegir, alSalir }: {
           Sesión
         </p>
         <p className="text-sm font-semibold text-white">{perfil.nombre}</p>
-        <p className="hidden text-xs text-rail-tenue md:block">{perfil.rol_nombre}</p>
+        <p className="hidden md:mt-1.5 md:block">
+          <EtiquetaRol perfil={perfil} fuerte />
+        </p>
         <button
           type="button"
           onClick={alSalir}

@@ -229,6 +229,10 @@ export interface Producto {
   sku: string;
   nombre: string;
   carrier: string;
+  /** Orden del carrier en el catálogo: los 8 primeros son botones fijos en la venta. */
+  carrier_orden: number;
+  /** "Tiempo aire", "Paquetes" o "Internet". Agrupa los productos de un carrier. */
+  familia: string;
   tipo: string;
   tipo_monto: "fijo" | "rango" | "recibo";
   monto_fijo: string | null;

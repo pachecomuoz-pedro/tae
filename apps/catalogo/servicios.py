@@ -168,3 +168,30 @@ def vendibles(inquilino, tipo=None):
         .select_related("carrier")
         .distinct()
     )
+
+
+# ---------------------------------------------------------------------------
+# Familia de un producto: cómo se agrupa en la pantalla de venta.
+# ---------------------------------------------------------------------------
+# Emida no manda una subcategoría confiable, así que se deduce del nombre.
+# Vive aquí y no en la pantalla para que haya un solo lugar que corregir el
+# día que el catálogo traiga un nombre que no encaje.
+FAMILIA_TIEMPO_AIRE = "Tiempo aire"
+FAMILIA_PAQUETES = "Paquetes"
+FAMILIA_INTERNET = "Internet"
+
+
+def familia_de(producto):
+    """'Internet', 'Paquetes' o 'Tiempo aire', a partir del nombre del producto."""
+    import unicodedata
+
+    nombre = "".join(
+        c for c in unicodedata.normalize("NFD", producto.nombre or "")
+        if unicodedata.category(c) != "Mn"
+    ).lower()
+    if "internet" in nombre or "datos" in nombre:
+        return FAMILIA_INTERNET
+    # "Amigo" solo no basta: Telcel también llama "Recarga Amigo" al tiempo aire.
+    if "paquete" in nombre or "sin limite" in nombre:
+        return FAMILIA_PAQUETES
+    return FAMILIA_TIEMPO_AIRE
