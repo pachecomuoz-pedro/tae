@@ -6,4 +6,5 @@ web/node_modules/
 staticfiles/
 respaldos/
 .kiro/
+# Bitácora de Emida (logs/emida.log): request, response, tiempos y cierre de cada venta.
 logs/
