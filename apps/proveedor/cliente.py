@@ -439,7 +439,7 @@ class ClienteProveedor:
             "POST", "/api/v1/transaction/topup",
             metodo="topup",
             cabeceras=self._cabeceras(invoice_no=invoice_no, product_id=product_id),
-            cuerpo={"accountId": str(account_id), "amount": str(Decimal(amount))},
+            cuerpo={"accountId": str(account_id), "amount": str(Decimal(amount).quantize(Decimal("0.00")))},
         )
 
     def user_fee(self, product_id):
@@ -465,8 +465,8 @@ class ClienteProveedor:
             cabeceras=self._cabeceras(invoice_no=invoice_no, product_id=product_id),
             cuerpo={
                 "accountNumber": str(account_number),
-                "amount": str(Decimal(amount)),
-                "userFee": str(Decimal(fee)),
+                "amount": str(Decimal(amount).quantize(Decimal("0.00"))),
+                "userFee": str(Decimal(fee).quantize(Decimal("0.00"))),
             },
         )
 
