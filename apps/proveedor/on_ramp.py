@@ -33,10 +33,18 @@ from apps.catalogo.servicios import MontoInvalido, ProductoNoDisponible
 from apps.saldo import services
 from apps.saldo.models import EstadoReserva
 
+from .bitacora import sanear_mensaje, trazar
 from .cliente import NoAutenticado, RechazoProveedor, SinRespuesta
 from .modelos_on_ramp import DesenlaceOnRamp, IntentoOnRamp, RegistroOnRamp
 
 log = logging.getLogger("tae.on_ramp")
+
+# Qué pasó con el saldo en cada desenlace, para la bitácora de Emida.
+_SALDO = {
+    DesenlaceOnRamp.APROBADA: "capturado",
+    DesenlaceOnRamp.RECHAZADA: "liberado",
+    DesenlaceOnRamp.SIN_RESOLVER: "reserva_viva",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +199,19 @@ def _cerrar_registro(registro, desenlace, *, respuesta=None, detalle="", mensaje
 
     registro.save()
 
+    # El teléfono no se incluye aquí ni en ningún trazar de este archivo.
+    cuerpo = (respuesta.cuerpo or {}) if respuesta is not None else {}
+    trazar(
+        "ON_RAMP_CIERRE",
+        nivel=logging.WARNING if desenlace == DesenlaceOnRamp.SIN_RESOLVER else logging.INFO,
+        folio=registro.operacion.folio, invoice=registro.invoice_no,
+        desenlace=desenlace, saldo=_SALDO.get(desenlace, ""),
+        status=cuerpo.get("status"), transaction_id=registro.transaction_id,
+        target_asset=registro.target_asset, target_amount=registro.target_amount,
+        fee=registro.fee,
+        detalle=None if desenlace == DesenlaceOnRamp.APROBADA else sanear_mensaje(detalle)[:300],
+    )
+
 
 def _cierre_con_respuesta(desenlace, reserva, respuesta, *, detalle=""):
     """El CierreOnRamp que se le devuelve a quien llamó, con lo que dijo el proveedor."""
@@ -283,6 +304,10 @@ def ejecutar_on_ramp(cliente, reserva, *, product_id, phone_number):
         invoice_no=invoice_no,
         product_id=str(product_id),
         phone_number=str(phone_number),  # solo auditoría, nunca en logs
+        monto=reserva.monto,
+    )
+    trazar(
+        "ON_RAMP_INICIO", folio=folio, invoice=invoice_no, product=product_id,
         monto=reserva.monto,
     )
 
@@ -479,6 +504,10 @@ def reintentar_sin_resolver_onramp(cliente, inquilino, *, limite=None):
             )
             continue
 
+        trazar(
+            "CONCILIACION", invoice=registro.invoice_no, folio=registro.operacion.folio,
+            nota="reintento de on-ramp sin resolver, consulta por Invoice-No",
+        )
         try:
             respuesta = cliente.lookup(registro.invoice_no)
         except RechazoProveedor as e:
@@ -562,4 +591,10 @@ def _aplicar_conciliacion(registro, reserva, intento, respuesta, *, accion, resu
         log.error("on_ramp conciliacion %s: %s: %s", registro.invoice_no, resultado_error, e)
         return False
     log.info("on_ramp conciliacion %s: %s", registro.invoice_no, desenlace)
+    trazar(
+        "ON_RAMP_CIERRE", folio=registro.operacion.folio, invoice=registro.invoice_no,
+        desenlace=desenlace, saldo=_SALDO.get(desenlace, ""),
+        transaction_id=registro.transaction_id, origen="conciliacion",
+        response_code=respuesta.response_code,
+    )
     return True

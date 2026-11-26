@@ -6,5 +6,4 @@ web/node_modules/
 staticfiles/
 respaldos/
 .kiro/
-# macOS
-.DS_Store
+logs/

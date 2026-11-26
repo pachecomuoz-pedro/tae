@@ -160,6 +160,41 @@ Organiza la carpeta como pide el Plan (sección 9) y súbela al drive junto con 
 Mex\Tk-<ticket>\Scorpion\AAAAMMDD\TA\
 ```
 
+## 8 bis. La bitácora de Emida (`logs/emida.log`)
+
+Cada llamada a Emida deja su rastro en `logs/emida.log`, en la carpeta del proyecto (la ves desde el Explorador de Windows). Es lo que se le enseña a Emida en la revisión de logs de la Fase 3 y en la sesión de la Fase 5. Con `docker compose logs -f api` sale lo mismo en la consola.
+
+```powershell
+# En vivo, mientras se ejecutan los casos (UTF8 para que se vean los acentos)
+Get-Content logs/emida.log -Wait -Tail 30 -Encoding UTF8
+
+# Una venta completa: envío, timeout, consultas y cierre (el ( |$) evita que invoice=12 traiga invoice=123)
+Select-String -Path logs/emida.log -Encoding UTF8 -Pattern "invoice=123( |$)"
+
+# Solo lo que merece atención: timeouts, rechazos, sin resolver
+Select-String -Path logs/emida.log -Encoding UTF8 -Pattern " WARNING | ERROR "
+```
+
+Cada línea es `hora nivel logger EVENTO clave=valor ...`, con la hora de México y milisegundos. Todas las líneas de una venta llevan `invoice=`.
+
+| Evento | Qué muestra |
+|---|---|
+| `REQ` | Lo que se mandó: método, URL, headers y body |
+| `RES` | Lo que contestó: código HTTP, milisegundos y body (los 4xx y 5xx salen como `WARNING`) |
+| `VEREDICTO` | Cómo se leyó la respuesta: `aprobada`, `response_code`, `h2h`, `transaction_id`, `control_no` |
+| `VENTA_INICIO` | Folio, producto, monto y la política de tiempos con la que sale la venta |
+| `TIMEOUT` | No hubo respuesta: cuánto se esperó |
+| `ESPERA_LOOKUP`, `LOOKUP_INTENTO`, `LOOKUP_RESULTADO` | El protocolo de reintentos: a los 40 s del envío, luego cada 10 s, y qué se concluyó en cada consulta |
+| `CIERRE` | Cómo terminó (`aprobada`, `rechazada`, `sin_resolver`) y qué pasó con el saldo: `capturado`, `liberado` o `reserva_viva` |
+| `ON_RAMP_INICIO`, `ON_RAMP_CIERRE` | Lo mismo para on-ramp (cripto) |
+| `CONCILIACION` | Una venta sin resolver que se vuelve a consultar |
+| `TOKEN` | Login con Emida: se obtuvo, cuánto dura, o un 401 que lo invalida |
+
+**Qué nunca queda en la bitácora** (sección 4.2 del Plan): el JWT, la contraseña, el PIN de una tarjeta ni el teléfono completo. Del teléfono se conservan los últimos 4 dígitos (`******4567`), también cuando Emida lo repite en su mensaje. El número completo, el PIN y el cuerpo íntegro siguen en la base y en `exportar_evidencia`. `transaction_id` y `control_no` sí salen completos, porque son la evidencia.
+
+- Nivel: `TAE_LOG_NIVEL` en el `.env` (por defecto `INFO`). Carpeta: `TAE_LOG_DIR`.
+- El archivo no rota solo: `api` y `tareas` escriben al mismo y la rotación por tamaño de dos procesos pierde líneas. Antes de una sesión nueva, bórralo o renómbralo.
+
 ## 9. Si algo falla
 
 | Síntoma | Qué revisar |
@@ -167,4 +202,4 @@ Mex\Tk-<ticket>\Scorpion\AAAAMMDD\TA\
 | La venta responde 503 "el proveedor no está disponible" | Falló el login con Emida antes de enviar: la venta no salió y el saldo no se tocó. Corre `probar_proveedor` |
 | La venta se queda en "sin resolver" | Es lo correcto si Emida no contestó. `docker compose exec api python manage.py reintentar_pendientes` la vuelve a consultar sin esperar a `tareas` |
 | El catálogo de la caja quedó vacío | Corre `vincular_producto --listar`: si los productos dicen "—", no están vinculados. Si Emida dejó de listarlos, la sincronización pausó sus rutas |
-| Ver qué pasó | `docker compose logs --tail=100 api` y `docker compose logs --tail=50 tareas` |
+| Ver qué pasó | `logs/emida.log` (ver 8 bis), o `docker compose logs --tail=100 api` y `docker compose logs --tail=50 tareas` |

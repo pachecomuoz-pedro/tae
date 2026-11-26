@@ -247,20 +247,57 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 #     if SECRET_KEY.startswith("dev-") or "cambiar" in SECRET_KEY:
 #         raise RuntimeError("DJANGO_SECRET_KEY de desarrollo con DEBUG apagado")
 
-# # Bitácoras a la salida estándar: Docker las recoge y `docker compose logs`
-# # las muestra. Los nombres "tae.*" son los que usa el código.
-# LOGGING = {
-#     "version": 1,
-#     "disable_existing_loggers": False,
-#     "formatters": {"simple": {"format": "{asctime} {levelname} {name}: {message}", "style": "{"}},
-#     "handlers": {"consola": {"class": "logging.StreamHandler", "formatter": "simple"}},
-#     "loggers": {
-#         "tae": {"handlers": ["consola"], "level": env("TAE_LOG_NIVEL", "INFO")},
-#         "django": {"handlers": ["consola"], "level": "WARNING"},
-#     },
-# }
+# ---------------------------------------------------------------------------
+# Bitácoras
+# ---------------------------------------------------------------------------
+# Antes este bloque estaba comentado, y sin él ningún log.info() llegaba a
+# ningún lado. Ahora hay dos destinos:
+#
+#   consola              todo lo de "tae.*" (docker compose logs -f api)
+#   logs/emida.log       solo la conversación con Emida (logger "tae.emida"):
+#                        request, response, HTTP, tiempos, lookups y cierre.
+#                        Es lo que se le enseña a Emida. Ver apps/proveedor/bitacora.py.
+#
+# Es un FileHandler sin rotación a propósito: el contenedor "api" y el de
+# "tareas" escriben al mismo archivo, y la rotación por tamaño de dos procesos
+# a la vez pierde líneas. Para limpiar, se borra o se rota desde fuera.
+TAE_LOG_DIR = Path(env("TAE_LOG_DIR", str(BASE_DIR / "logs")))
 
-# # En las pruebas, silencio: los avisos esperados (timeouts emulados) no deben
-# # enterrar el resultado de la suite.
-# if "test" in sys.argv:
-#     LOGGING["loggers"]["tae"]["level"] = "CRITICAL"
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        # Hora de la zona del proyecto con milisegundos, no la del contenedor.
+        "tae": {
+            "class": "apps.proveedor.bitacora.FormatoEmida",
+            "format": "{asctime} {levelname:<7} {name:<12} {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {"consola": {"class": "logging.StreamHandler", "formatter": "tae"}},
+    "loggers": {
+        "tae": {"handlers": ["consola"], "level": env("TAE_LOG_NIVEL", "INFO")},
+        "django": {"handlers": ["consola"], "level": "WARNING"},
+    },
+}
+
+if "test" in sys.argv:
+    # En las pruebas, silencio: los avisos esperados (timeouts emulados) no
+    # deben enterrar el resultado de la suite, ni ensuciar el archivo real.
+    LOGGING["loggers"]["tae"]["level"] = "CRITICAL"
+    LOGGING["loggers"]["django"]["level"] = "CRITICAL"
+else:
+    try:
+        TAE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        LOGGING["handlers"]["emida"] = {
+            "class": "logging.FileHandler",
+            "filename": str(TAE_LOG_DIR / "emida.log"),
+            "encoding": "utf-8",
+            "delay": True,  # no crea el archivo hasta la primera línea
+            "formatter": "tae",
+        }
+        # Sin nivel propio: hereda el de "tae", así TAE_LOG_NIVEL manda en los dos.
+        LOGGING["loggers"]["tae.emida"] = {"handlers": ["emida"], "propagate": True}
+    except OSError:
+        # Carpeta de solo lectura: se sigue sin archivo; la consola funciona igual.
+        pass

@@ -28,10 +28,19 @@ from django.utils import timezone
 from apps.saldo import services
 from apps.saldo.models import EstadoReserva
 
+from .bitacora import enmascarar_telefono, sanear_mensaje, trazar
 from .cliente import NoAutenticado, RechazoProveedor, Respuesta, SinRespuesta
 from .modelos import Desenlace, IntentoProveedor, RegistroEnvio
 
 log = logging.getLogger("tae.venta")
+
+# Qué pasó con el saldo del tendero en cada desenlace, dicho en una palabra
+# para la bitácora de Emida.
+_SALDO = {
+    Desenlace.APROBADA: "capturado",
+    Desenlace.RECHAZADA: "liberado",
+    Desenlace.SIN_RESOLVER: "reserva_viva",
+}
 
 
 class ProveedorNoDisponible(Exception):
@@ -115,6 +124,12 @@ def cerrar_venta(cliente, reserva, *, account_id, product_id, dormir=time.sleep)
     # Se marca cuándo salió: el proveedor pide la primera consulta a los 40
     # segundos CONTADOS DESDE EL ENVÍO, no desde que se nos acabó la espera.
     salio = time.monotonic()
+    trazar(
+        "VENTA_INICIO", folio=reserva.operacion.folio, invoice=invoice_no,
+        product=product_id, monto=reserva.monto, cuenta=enmascarar_telefono(account_id),
+        politica={"timeout_s": cfg.timeout_venta, "lookup_a_los_s": cfg.lookup_desde_envio,
+                  "cada_s": cfg.espera_entre_lookups, "max_lookups": cfg.max_lookups},
+    )
 
     try:
         respuesta = cliente.topup(
@@ -159,22 +174,47 @@ def cerrar_venta(cliente, reserva, *, account_id, product_id, dormir=time.sleep)
     # --- el proveedor no contestó: se consulta ---------------------------
     # Lo que falte para llegar a los 40 segundos desde el envío.
     falta = cfg.lookup_desde_envio - (time.monotonic() - salio)
+    trazar(
+        "ESPERA_LOOKUP", nivel=logging.WARNING, invoice=invoice_no,
+        t_s=round(time.monotonic() - salio, 1), espera_s=round(max(falta, 0), 1),
+        nota="sin respuesta al envio; la reserva sigue viva y se consulta por Invoice-No",
+    )
     dormir(max(falta, 0))
 
     for intento in range(1, cfg.max_lookups + 1):
+        n = f"{intento}/{cfg.max_lookups}"
+        trazar(
+            "LOOKUP_INTENTO", invoice=invoice_no, intento=n,
+            t_s=round(time.monotonic() - salio, 1),
+        )
         try:
             respuesta = cliente.lookup(invoice_no)
             _registrar(registro, tipo="lookup", respuesta=respuesta)
 
             if respuesta.aprobada:
+                trazar(
+                    "LOOKUP_RESULTADO", invoice=invoice_no, intento=n,
+                    response_code=respuesta.response_code, h2h=respuesta.h2h_result_code,
+                    conclusion="aprobada: existe y fue aprobada, se cobra",
+                )
                 return _resolver(registro, reserva, respuesta, intentos=intento)
 
             # Contestó con un código que no es de aprobación. Puede ser que
             # la rechazó, o que todavía la está procesando. La diferencia la
             # da el folio del carrier: sin folio, no hay nada entregado.
             if respuesta.control_no or respuesta.transaction_id:
+                trazar(
+                    "LOOKUP_RESULTADO", invoice=invoice_no, intento=n,
+                    response_code=respuesta.response_code, h2h=respuesta.h2h_result_code,
+                    conclusion="existe y NO fue aprobada, se libera",
+                )
                 return _resolver(registro, reserva, respuesta, intentos=intento)
 
+            trazar(
+                "LOOKUP_RESULTADO", invoice=invoice_no, intento=n,
+                response_code=respuesta.response_code, h2h=respuesta.h2h_result_code,
+                conclusion="sin informacion aun, se vuelve a consultar",
+            )
             log.info(
                 "lookup %s intento %s: todavía sin resolver", invoice_no, intento
             )
@@ -182,6 +222,10 @@ def cerrar_venta(cliente, reserva, *, account_id, product_id, dormir=time.sleep)
         except RechazoProveedor as e:
             if e.http == 404:
                 # El proveedor no conoce ese Invoice-No: la venta nunca entró.
+                trazar(
+                    "LOOKUP_RESULTADO", invoice=invoice_no, intento=n, http=404,
+                    conclusion="el proveedor no tiene la transaccion, se libera",
+                )
                 _registrar(registro, tipo="lookup", error=str(e), rechazo=e)
                 services.liberar(reserva)
                 return _cerrar(
@@ -189,15 +233,29 @@ def cerrar_venta(cliente, reserva, *, account_id, product_id, dormir=time.sleep)
                     detalle="El proveedor no tiene registro de la venta",
                     intentos=intento,
                 )
+            trazar(
+                "LOOKUP_RESULTADO", nivel=logging.WARNING, invoice=invoice_no,
+                intento=n, http=e.http,
+                conclusion="rechazo que no prueba nada, se vuelve a consultar",
+            )
             _registrar(registro, tipo="lookup", error=str(e))
 
         except (SinRespuesta, NoAutenticado) as e:
             # NoAutenticado aquí NO libera: la venta ya salió y pudo haberse
             # aplicado. Un login caído durante la consulta es, para efectos
             # de dinero, lo mismo que un silencio.
+            trazar(
+                "LOOKUP_RESULTADO", nivel=logging.WARNING, invoice=invoice_no,
+                intento=n, error=type(e).__name__,
+                conclusion="la consulta tampoco respondio, no se libera",
+            )
             _registrar(registro, tipo="lookup", error=str(e))
 
         if intento < cfg.max_lookups:
+            trazar(
+                "ESPERA_LOOKUP", invoice=invoice_no, espera_s=cfg.espera_entre_lookups,
+                nota="intervalo entre consultas",
+            )
             dormir(cfg.espera_entre_lookups)
 
     # --- se agotaron los intentos ----------------------------------------
@@ -246,6 +304,19 @@ def _cerrar(registro, desenlace, reserva, *, respuesta=None, intentos=0, detalle
     registro.save()
 
     reserva.refresh_from_db()
+    trazar(
+        "CIERRE",
+        nivel=logging.WARNING if desenlace == Desenlace.SIN_RESOLVER else logging.INFO,
+        folio=reserva.operacion.folio, invoice=registro.invoice_no,
+        desenlace=desenlace, intentos=intentos, saldo=_SALDO.get(desenlace, ""),
+        response_code=registro.response_code, h2h=registro.h2h_result_code,
+        transaction_id=registro.transaction_id, control_no=registro.control_no,
+        carrier_control_no=registro.carrier_control_no,
+        duracion_s=round((registro.cerrado - registro.creado).total_seconds(), 1),
+        # En una aprobada el detalle solo repite el folio, que ya va completo
+        # en control_no; el filtro de teléfonos lo enmascararía.
+        detalle=None if desenlace == Desenlace.APROBADA else sanear_mensaje(detalle)[:300],
+    )
     if respuesta is not None:
         mensaje = mensaje or respuesta.mensaje
         codigo = codigo or respuesta.response_code
@@ -276,14 +347,28 @@ def reintentar_sin_resolver(cliente, inquilino, *, limite=100, dormir=time.sleep
         reserva = getattr(registro.operacion, "reserva", None)
         if reserva is None or reserva.estado != EstadoReserva.ACTIVA:
             continue
+        trazar(
+            "CONCILIACION", invoice=registro.invoice_no, folio=registro.operacion.folio,
+            nota="reintento de una venta sin resolver, consulta por Invoice-No",
+        )
         try:
             respuesta = cliente.lookup(registro.invoice_no)
             _registrar(registro, tipo="lookup", respuesta=respuesta)
             if respuesta.aprobada or respuesta.control_no:
                 resueltos.append(_resolver(registro, reserva, respuesta, intentos=0))
+            else:
+                trazar(
+                    "LOOKUP_RESULTADO", invoice=registro.invoice_no,
+                    response_code=respuesta.response_code,
+                    conclusion="sin informacion aun, la reserva sigue viva",
+                )
         except RechazoProveedor as e:
             _registrar(registro, tipo="lookup", error=str(e))
             if e.http == 404:
+                trazar(
+                    "LOOKUP_RESULTADO", invoice=registro.invoice_no, http=404,
+                    conclusion="el proveedor no tiene la transaccion, se libera",
+                )
                 services.liberar(reserva)
                 resueltos.append(
                     _cerrar(

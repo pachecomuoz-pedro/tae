@@ -25,10 +25,15 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 
 import requests
 from django.conf import settings
+
+from .bitacora import (
+    cuerpo_para_log, enmascarar_correo, milisegundos, sanear, sanear_cabeceras,
+    sanear_mensaje, trazar,
+)
 
 log = logging.getLogger("tae.proveedor")
 
@@ -75,6 +80,11 @@ APROBADOS = {"0", "00"}
 # se aplica la lectura prudente: si el proveedor lo manda, tiene que venir en
 # cero; si no lo manda, no se inventa un requisito que ellos no pidieron.
 METODOS_CONOCIDOS = {"topup", "bill_payment", "lookup", "on_ramp", "on_ramp_exchange_rate"}
+
+# Métodos cuya respuesta se juzga con `aprobada()` y por eso llevan VEREDICTO
+# en la bitácora. La cotización de on-ramp se juzga por sus cuatro campos, no
+# por responseCode, así que queda fuera.
+VEREDICTO_EN = {"topup", "bill_payment", "lookup", "on_ramp"}
 
 
 def aprobada(metodo, cuerpo):
@@ -241,23 +251,43 @@ class ClienteProveedor:
     # -- autenticación ----------------------------------------------------
     def _autenticar(self):
         url = f"{self.config.base_url}{self.config.prefijo_login}/api/v1/auth/login"
+        campo = self.config.campo_usuario or "email"
+        h = {
+            "Authorization": "Bearer ",
+            "APP": "INTEGRATOR_API",
+        }
+        # En la bitácora el usuario va enmascarado y la contraseña no va.
+        trazar(
+            "REQ", metodo="login", verbo="POST", url=url, headers=sanear_cabeceras(h),
+            body={campo: enmascarar_correo(self.config.usuario), "password": "***"},
+            timeout_s=self.config.timeout_lookup,
+        )
+        inicio = time.monotonic()
         try:
-            h = {
-                "Authorization": "Bearer ",
-                "APP": "INTEGRATOR_API",
-            }
             r = self.sesion.post(
                 url,
                 headers=h,
-                json={self.config.campo_usuario or "email": self.config.usuario,
-                      "password": self.config.contrasena},
+                json={campo: self.config.usuario, "password": self.config.contrasena},
                 timeout=self.config.timeout_lookup,
             )
         except requests.RequestException as e:
+            trazar(
+                "ERROR_RED", nivel=logging.WARNING, metodo="login",
+                ms=milisegundos(inicio), error=type(e).__name__,
+            )
             raise NoAutenticado(f"No se pudo pedir el token: {e}") from e
 
+        try:
+            datos_log = r.json()
+        except ValueError:
+            datos_log = None
+        # El body va enmascarado: queda el HTTP y cuánto tardó, no la llave.
+        trazar(
+            "RES", nivel=logging.INFO if r.status_code == 200 else logging.WARNING,
+            metodo="login", http=r.status_code, ms=milisegundos(inicio),
+            body=cuerpo_para_log(datos_log, r.text),
+        )
         if r.status_code != 200:
-            log.warning("login rechazado: HTTP %s %s", r.status_code, r.text[:300])
             raise NoAutenticado(f"Login rechazado con HTTP {r.status_code}")
 
         try:
@@ -275,6 +305,10 @@ class ClienteProveedor:
         vigencia = float(cuerpo.get("expiresIn") or 900)
         self._token = token
         self._token_vence = time.monotonic() + vigencia - 60
+        trazar(
+            "TOKEN", metodo="login", estado="obtenido", vigencia_s=int(vigencia),
+            renueva_en_s=int(max(vigencia - 60, 0)),
+        )
         return token
 
     def token(self):
@@ -305,30 +339,64 @@ class ClienteProveedor:
         return cab
 
     # -- llamada base -----------------------------------------------------
-    def _llamar(self, metodo_http, ruta, *, metodo, cabeceras, cuerpo=None, timeout=None):
+    def _llamar(self, metodo_http, ruta, *, metodo, cabeceras, cuerpo=None, timeout=None,
+                invoice=None):
         url = f"{self.config.base_url}{self.config.prefijo_operaciones}{ruta}"
+        limite = timeout or self.config.timeout_venta
+        # `invoice=` en cada línea: con él se sigue una venta completa (envío,
+        # timeout, lookups) filtrando el archivo por ese número. El lookup lo
+        # lleva en la URL y no en un header, por eso se puede pasar aparte.
+        invoice = str(invoice if invoice is not None else cabeceras.get("Invoice-No", ""))
+
+        # Lo que SALE. Headers y body se enmascaran (JWT, teléfono) solo para
+        # el log: a la red va el original.
+        trazar(
+            "REQ", metodo=metodo, invoice=invoice, verbo=metodo_http, url=url,
+            headers=sanear_cabeceras(cabeceras), body=sanear(cuerpo) if cuerpo else None,
+            timeout_s=limite,
+        )
+        inicio = time.monotonic()
         try:
             r = self.sesion.request(
-                metodo_http, url, headers=cabeceras, json=cuerpo,
-                timeout=timeout or self.config.timeout_venta,
+                metodo_http, url, headers=cabeceras, json=cuerpo, timeout=limite,
             )
         except requests.Timeout as e:
             # El caso que define el diseño: no sabemos si pasó o no.
-            raise SinRespuesta(f"{metodo} no respondió en {timeout}s") from e
+            trazar(
+                "TIMEOUT", nivel=logging.WARNING, metodo=metodo, invoice=invoice,
+                ms=milisegundos(inicio), limite_s=limite,
+                nota="sin respuesta: no se sabe si la transaccion se aplico",
+            )
+            raise SinRespuesta(f"{metodo} no respondió en {limite}s") from e
         except requests.RequestException as e:
+            trazar(
+                "ERROR_RED", nivel=logging.WARNING, metodo=metodo, invoice=invoice,
+                ms=milisegundos(inicio), error=type(e).__name__,
+            )
             raise SinRespuesta(f"{metodo} falló la conexión: {e}") from e
 
         try:
             datos = r.json()
+            legible = True
         except ValueError:
             datos = {}
+            legible = False
 
-        # Una línea por llamada, sin cuerpo: el cuerpo de una venta de pines
-        # trae el PIN y no debe quedar en los logs.
-        log.info("%s %s %s → HTTP %s", metodo, metodo_http, url, r.status_code)
+        # Lo que ENTRA. El PIN de una tarjeta y el token vienen enmascarados
+        # (ver bitacora.sanear); lo demás va completo, que es lo que Emida
+        # quiere ver. 4xx/5xx suben a WARNING para que salten a la vista.
+        trazar(
+            "RES", nivel=logging.INFO if r.status_code < 400 else logging.WARNING,
+            metodo=metodo, invoice=invoice, http=r.status_code, ms=milisegundos(inicio),
+            body=cuerpo_para_log(datos if legible else None, r.text),
+        )
 
         if r.status_code == 401:
             self.invalidar_token()
+            trazar(
+                "TOKEN", nivel=logging.WARNING, metodo=metodo, invoice=invoice,
+                estado="rechazado_401", nota="se invalida y el siguiente intento pide uno nuevo",
+            )
             raise RechazoProveedor(
                 "El proveedor rechazó el token", http=401, cuerpo=datos
             )
@@ -337,8 +405,6 @@ class ClienteProveedor:
             # rechazos definitivos: la venta NO ocurrió y el saldo se libera.
             if not isinstance(datos, dict):
                 datos = {"detail": str(datos)[:500]}
-            # En un error sí se registra el cuerpo: trae el motivo y no trae PINs.
-            log.warning("%s rechazado HTTP %s: %s", metodo, r.status_code, str(datos)[:500])
             interior = desenvolver(datos)
             interior = interior if isinstance(interior, dict) else {}
             raise RechazoProveedor(
@@ -349,28 +415,31 @@ class ClienteProveedor:
                 cuerpo=datos,
             )
 
-        return Respuesta.desde(metodo, r.status_code, datos, crudo=r.text[:4000])
+        respuesta = Respuesta.desde(metodo, r.status_code, datos, crudo=r.text[:4000])
+        # Cómo la leímos: el criterio de éxito (responseCode 0/00, h2h en 0) y
+        # los campos clave que Emida revisa en la Fase 3. El PIN no se incluye.
+        # Solo en los métodos que tienen criterio de éxito: en una consulta de
+        # catálogo "aprobada=no" confundiría, porque ahí no aplica.
+        if metodo in VEREDICTO_EN:
+            trazar(
+                "VEREDICTO", metodo=metodo, invoice=invoice,
+                aprobada="si" if respuesta.aprobada else "no",
+                response_code=respuesta.response_code, h2h=respuesta.h2h_result_code,
+                status=respuesta.cuerpo.get("status") if metodo == "on_ramp" else None,
+                transaction_id=respuesta.transaction_id, control_no=respuesta.control_no,
+                carrier_control_no=respuesta.carrier_control_no,
+                mensaje=sanear_mensaje(respuesta.mensaje)[:200],
+            )
+        return respuesta
 
     # -- métodos del API --------------------------------------------------
-    @staticmethod
-    def _importe(valor):
-        """
-        Un monto como lo pide el API: texto con exactamente 2 decimales ("50.00").
-
-        La base guarda 4 decimales (50.0000) y el proveedor rechaza con 400
-        "amount must have at most 2 decimal places". El catálogo ya rechaza
-        montos con centavos de más antes de reservar, así que aquí cuantizar
-        nunca cambia el valor: solo el formato.
-        """
-        return str(Decimal(str(valor)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-
     def topup(self, *, invoice_no, product_id, account_id, amount):
         """Venta de tiempo aire. PinDistSale en el nombre viejo."""
         return self._llamar(
             "POST", "/api/v1/transaction/topup",
             metodo="topup",
             cabeceras=self._cabeceras(invoice_no=invoice_no, product_id=product_id),
-            cuerpo={"accountId": str(account_id), "amount": self._importe(amount)},
+            cuerpo={"accountId": str(account_id), "amount": str(Decimal(amount))},
         )
 
     def user_fee(self, product_id):
@@ -396,8 +465,8 @@ class ClienteProveedor:
             cabeceras=self._cabeceras(invoice_no=invoice_no, product_id=product_id),
             cuerpo={
                 "accountNumber": str(account_number),
-                "amount": self._importe(amount),
-                "userFee": self._importe(fee),
+                "amount": str(Decimal(amount)),
+                "userFee": str(Decimal(fee)),
             },
         )
 
@@ -414,6 +483,7 @@ class ClienteProveedor:
             metodo="lookup",
             cabeceras=self._cabeceras(),
             timeout=self.config.timeout_lookup,
+            invoice=invoice_no,
         )
 
     def saldo_merchant(self):
